@@ -12,13 +12,13 @@ Architecture:
 """
 
 import os
-from typing import Annotated, Literal, TypedDict
+from typing import Literal, TypedDict
 from dotenv import load_dotenv
 from colorama import Fore, Style, init as colorama_init
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from e2b_code_interpreter import Sandbox
 
