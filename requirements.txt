@@ -1,0 +1,17 @@
+# Core LangGraph and LangChain dependencies
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+
+# E2B Sandbox for code execution
+e2b-code-interpreter>=1.0.0
+
+# Environment and configuration
+python-dotenv>=1.0.0
+
+# Type hints and validation
+pydantic>=2.0.0
+
+# Utilities
+colorama>=0.4.6
