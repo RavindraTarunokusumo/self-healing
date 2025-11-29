@@ -33,7 +33,7 @@ The agent follows a **cyclic three-node workflow** implemented with LangGraph:
 - **Autonomous**: Iteratively fixes code without human intervention
 - **Safe Execution**: Uses E2B sandboxes for isolated code execution
 - **Reflexion Pattern**: Critic provides feedback that guides the next iteration
-- **Configurable**: Supports both OpenAI (GPT-4) and Anthropic (Claude) models
+- **Configurable**: Supports OpenAI, Anthropic and Qwen models.
 - **Research-Oriented**: Designed for experimentation with self-correction techniques
 
 ## 🚀 Quick Start
@@ -41,7 +41,7 @@ The agent follows a **cyclic three-node workflow** implemented with LangGraph:
 ### Prerequisites
 
 - Python 3.9 or higher
-- API keys for LLM provider (OpenAI or Anthropic)
+- API keys for LLM provider (OpenAI, Anthropic or Qwen)
 - E2B API key for sandbox execution
 
 ### Installation
@@ -62,6 +62,7 @@ pip install -r requirements.txt
 # Create a .env file with your API keys
 echo "OPENAI_API_KEY=your_openai_key_here" > .env
 echo "ANTHROPIC_API_KEY=your_anthropic_key_here" >> .env
+echo "QWEN_API_KEY=your_qwen_key_here" >> .env
 echo "E2B_API_KEY=your_e2b_key_here" >> .env
 ```
 

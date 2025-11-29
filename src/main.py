@@ -2,22 +2,32 @@
 Self-Healing Code Agent using LangGraph
 
 This module implements an autonomous code generation and fixing system using LangGraph.
-The workflow follows a cyclic pattern: Generator -> Executor -> Critic, with each node
+The workflow follows a cyclic pattern: Coder -> Executor -> Critic, with each node
 capable of triggering iterations until the code is correct.
 
 Architecture:
-- Generator: Uses LLM to generate Python code based on a specification
+- Coder: Uses LLM to generate Python code based on a specification
 - Executor: Runs code in E2B sandbox and captures output/errors
 - Critic: Analyzes results and decides whether to iterate or complete
 """
 
 import os
+import logging
+import argparse
+from datetime import datetime
 from typing import Literal, TypedDict
+import typing
+import typing_extensions
+
+# Monkeypatch Self for Python < 3.11
+if not hasattr(typing, "Self"):
+    typing.Self = typing_extensions.Self
 from dotenv import load_dotenv
 from colorama import Fore, Style, init as colorama_init
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
+from langchain_qwq import ChatQwen
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from e2b_code_interpreter import Sandbox
@@ -48,40 +58,82 @@ class SelfHealingAgent:
     
     def __init__(
         self, 
-        model_provider: Literal["openai", "anthropic"] = "openai",
-        model_name: str = "gpt-4",
+        coder_model_provider: Literal["openai", "anthropic", "qwen"] = "openai",
+        coder_model_name: str = "gpt-4",
+        critic_model_provider: Literal["openai", "anthropic", "qwen"] = "openai",
+        critic_model_name: str = "gpt-4",
+        coder_max_tokens: int = 32000,
+        critic_max_tokens: int = 32000,
         max_iterations: int = 5
     ):
         """
         Initialize the Self-Healing Agent.
         
         Args:
-            model_provider: Which LLM provider to use ("openai" or "anthropic")
-            model_name: Specific model to use (e.g., "gpt-4", "claude-3-5-sonnet-20241022")
+            coder_model_provider: Provider for the Coder LLM ("openai", "anthropic", "qwen")
+            coder_model_name: Model name for the Coder LLM
+            critic_model_provider: Provider for the Critic LLM ("openai", "anthropic", "qwen")
+            critic_model_name: Model name for the Critic LLM
             max_iterations: Maximum number of self-healing iterations
         """
         self.max_iterations = max_iterations
         
-        # Initialize the appropriate LLM
-        if model_provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY not found in environment variables")
-            self.llm = ChatOpenAI(model=model_name, temperature=0.7)
-        elif model_provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
-            self.llm = ChatAnthropic(model=model_name, temperature=0.7)
-        else:
-            raise ValueError(f"Unsupported model provider: {model_provider}")
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+        # Create logs directory
+        log_dir = os.path.join(os.getcwd(), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Create file handler with date-based filename
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H-%M-%S")
+        log_file = os.path.join(log_dir, f"{current_date}_{current_time}.log")
+        file_handler = logging.FileHandler(log_file)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Add handlers
+        self.logger.addHandler(file_handler)
+        
+        # Add stream handler
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        self.logger.addHandler(stream_handler)
+        
+        # Initialize the appropriate LLM for Coder and Critic
+        self.coder_llm = self._create_llm(coder_model_provider, coder_model_name, coder_max_tokens)
+        self.critic_llm = self._create_llm(critic_model_provider, critic_model_name, critic_max_tokens)
         
         # Build the LangGraph workflow
         self.workflow = self._build_workflow()
+
+    def _create_llm(self, provider: str, model_name: str, max_tokens: int = 32000):
+        """Helper method to create LLM instances."""
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not found in environment variables")
+            return ChatOpenAI(model=model_name, temperature=0.7, max_tokens=max_tokens)
+        elif provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
+            return ChatAnthropic(model=model_name, temperature=0.7, max_tokens=max_tokens)
+        elif provider == "qwen":
+            api_key = os.getenv("QWEN_API_KEY")
+            if not api_key:
+                raise ValueError("QWEN_API_KEY not found in environment variables")
+            return ChatQwen(model=model_name, api_key=api_key, temperature=0.7, max_tokens=max_tokens)  
+        else:
+            raise ValueError(f"Unsupported model provider: {provider}")
     
     def _build_workflow(self) -> StateGraph:
         """
-        Build the cyclic LangGraph workflow: Generator -> Executor -> Critic.
+        Build the cyclic LangGraph workflow: Coder -> Executor -> Critic.
         
         Returns:
             Compiled StateGraph workflow
@@ -89,30 +141,30 @@ class SelfHealingAgent:
         workflow = StateGraph(AgentState)
         
         # Add nodes
-        workflow.add_node("generator", self._generator_node)
+        workflow.add_node("coder", self._coder_node)
         workflow.add_node("executor", self._executor_node)
         workflow.add_node("critic", self._critic_node)
         
         # Define edges
-        workflow.set_entry_point("generator")
-        workflow.add_edge("generator", "executor")
+        workflow.set_entry_point("coder")
+        workflow.add_edge("coder", "executor")
         workflow.add_edge("executor", "critic")
         
-        # Conditional edge from critic: either go back to generator or end
+        # Conditional edge from critic: either go back to coder or end
         workflow.add_conditional_edges(
             "critic",
             self._should_continue,
             {
-                "continue": "generator",
+                "continue": "coder",
                 "end": END
             }
         )
         
         return workflow.compile()
     
-    def _generator_node(self, state: AgentState) -> AgentState:
+    def _coder_node(self, state: AgentState) -> AgentState:
         """
-        Generator Node: Creates or fixes Python code based on specification and feedback.
+        Coder Node: Creates or fixes Python code based on specification and feedback.
         
         Args:
             state: Current agent state
@@ -120,9 +172,9 @@ class SelfHealingAgent:
         Returns:
             Updated state with new/fixed code
         """
-        print(f"\n{Fore.CYAN}{'='*60}")
-        print(f"{Fore.CYAN}GENERATOR - Iteration {state['iteration'] + 1}")
-        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        self.logger.info(f"\n{Fore.CYAN}{'='*60}")
+        self.logger.info(f"{Fore.CYAN}Coder - Iteration {state['iteration'] + 1}")
+        self.logger.info(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
         
         # Build prompt based on whether this is initial generation or fixing
         if state["iteration"] == 0:
@@ -155,7 +207,7 @@ class SelfHealingAgent:
             HumanMessage(content=user_prompt)
         ]
         
-        response = self.llm.invoke(messages)
+        response = self.coder_llm.invoke(messages)
         generated_code = response.content
         
         # Extract code from markdown code blocks if present
@@ -164,8 +216,8 @@ class SelfHealingAgent:
         elif "```" in generated_code:
             generated_code = generated_code.split("```")[1].split("```")[0].strip()
         
-        print(f"{Fore.GREEN}Generated Code:{Style.RESET_ALL}")
-        print(generated_code)
+        self.logger.info(f"{Fore.GREEN}Generated Code:{Style.RESET_ALL}")
+        self.logger.info(generated_code)
         
         return {
             **state,
@@ -182,16 +234,16 @@ class SelfHealingAgent:
         Returns:
             Updated state with execution results
         """
-        print(f"\n{Fore.YELLOW}{'='*60}")
-        print(f"{Fore.YELLOW}EXECUTOR - Running code in sandbox")
-        print(f"{Fore.YELLOW}{'='*60}{Style.RESET_ALL}")
+        self.logger.info(f"\n{Fore.YELLOW}{'='*60}")
+        self.logger.info(f"{Fore.YELLOW}EXECUTOR - Running code in sandbox")
+        self.logger.info(f"{Fore.YELLOW}{'='*60}{Style.RESET_ALL}")
         
         execution_output = ""
         execution_error = ""
         
         try:
             # Create E2B sandbox and execute code
-            with Sandbox() as sandbox:
+            with Sandbox.create() as sandbox:
                 execution = sandbox.run_code(state["code"])
                 
                 # Capture output and errors
@@ -208,12 +260,12 @@ class SelfHealingAgent:
         except Exception as e:
             execution_error = f"Sandbox execution failed: {str(e)}"
         
-        print(f"{Fore.YELLOW}Execution Output:{Style.RESET_ALL}")
-        print(execution_output if execution_output else "(no output)")
+        self.logger.info(f"{Fore.YELLOW}Execution Output:{Style.RESET_ALL}")
+        self.logger.info(execution_output if execution_output else "(no output)")
         
         if execution_error:
-            print(f"{Fore.RED}Execution Errors:{Style.RESET_ALL}")
-            print(execution_error)
+            self.logger.info(f"{Fore.RED}Execution Errors:{Style.RESET_ALL}")
+            self.logger.info(execution_error)
         
         return {
             **state,
@@ -231,9 +283,9 @@ class SelfHealingAgent:
         Returns:
             Updated state with critic feedback and completion status
         """
-        print(f"\n{Fore.MAGENTA}{'='*60}")
-        print(f"{Fore.MAGENTA}CRITIC - Analyzing results")
-        print(f"{Fore.MAGENTA}{'='*60}{Style.RESET_ALL}")
+        self.logger.info(f"\n{Fore.MAGENTA}{'='*60}")
+        self.logger.info(f"{Fore.MAGENTA}CRITIC - Analyzing results")
+        self.logger.info(f"{Fore.MAGENTA}{'='*60}{Style.RESET_ALL}")
         
         # Build critic prompt
         system_prompt = (
@@ -257,11 +309,11 @@ class SelfHealingAgent:
             HumanMessage(content=user_prompt)
         ]
         
-        response = self.llm.invoke(messages)
+        response = self.critic_llm.invoke(messages)
         feedback = response.content
         
-        print(f"{Fore.MAGENTA}Critic Feedback:{Style.RESET_ALL}")
-        print(feedback)
+        self.logger.info(f"{Fore.MAGENTA}Critic Feedback:{Style.RESET_ALL}")
+        self.logger.info(feedback)
         
         # Determine if code is complete (no errors and APPROVED by critic)
         is_complete = (
@@ -287,14 +339,14 @@ class SelfHealingAgent:
             "continue" to iterate again, "end" to stop
         """
         if state["is_complete"]:
-            print(f"\n{Fore.GREEN}✓ Code approved! Workflow complete.{Style.RESET_ALL}")
+            self.logger.info(f"\n{Fore.GREEN}✓ Code approved! Workflow complete.{Style.RESET_ALL}")
             return "end"
         
         if state["iteration"] >= state["max_iterations"]:
-            print(f"\n{Fore.RED}✗ Max iterations reached. Workflow ending.{Style.RESET_ALL}")
+            self.logger.info(f"\n{Fore.RED}✗ Max iterations reached. Workflow ending.{Style.RESET_ALL}")
             return "end"
         
-        print(f"\n{Fore.YELLOW}→ Continuing to next iteration...{Style.RESET_ALL}")
+        self.logger.info(f"\n{Fore.YELLOW}→ Continuing to next iteration...{Style.RESET_ALL}")
         return "continue"
     
     def run(self, specification: str) -> AgentState:
@@ -307,10 +359,10 @@ class SelfHealingAgent:
         Returns:
             Final agent state with generated code and results
         """
-        print(f"\n{Fore.BLUE}{'='*60}")
-        print(f"{Fore.BLUE}SELF-HEALING CODE AGENT")
-        print(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
-        print(f"\nSpecification: {specification}\n")
+        self.logger.info(f"\n{Fore.BLUE}{'='*60}")
+        self.logger.info(f"{Fore.BLUE}SELF-HEALING CODE AGENT")
+        self.logger.info(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
+        self.logger.info(f"\nSpecification: {specification}\n")
         
         initial_state: AgentState = {
             "specification": specification,
@@ -325,12 +377,12 @@ class SelfHealingAgent:
         
         final_state = self.workflow.invoke(initial_state)
         
-        print(f"\n{Fore.BLUE}{'='*60}")
-        print(f"{Fore.BLUE}FINAL RESULTS")
-        print(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
-        print(f"\nTotal iterations: {final_state['iteration']}")
-        print(f"Status: {'✓ Complete' if final_state['is_complete'] else '✗ Incomplete'}")
-        print(f"\nFinal code:\n{Fore.GREEN}{final_state['code']}{Style.RESET_ALL}")
+        self.logger.info(f"\n{Fore.BLUE}{'='*60}")
+        self.logger.info(f"{Fore.BLUE}FINAL RESULTS")
+        self.logger.info(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
+        self.logger.info(f"\nTotal iterations: {final_state['iteration']}")
+        self.logger.info(f"Status: {'✓ Complete' if final_state['is_complete'] else '✗ Incomplete'}")
+        self.logger.info(f"\nFinal code:\n{Fore.GREEN}{final_state['code']}{Style.RESET_ALL}")
         
         return final_state
 
@@ -339,6 +391,56 @@ def main():
     """
     Example usage of the Self-Healing Code Agent.
     """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run the Self-Healing Code Agent")
+    
+    parser.add_argument(
+        "--coder-provider", 
+        type=str, 
+        default="openai", 
+        choices=["openai", "anthropic", "qwen"], 
+        help="Provider for the Coder LLM"
+    )
+    parser.add_argument(
+        "--coder-model", 
+        type=str, 
+        default="gpt-4", 
+        help="Model name for the Coder LLM"
+    )
+    parser.add_argument(
+        "--critic-provider", 
+        type=str, 
+        default="openai", 
+        choices=["openai", "anthropic", "qwen"], 
+        help="Provider for the Critic LLM"
+    )
+    parser.add_argument(
+        "--critic-model", 
+        type=str, 
+        default="gpt-4", 
+        help="Model name for the Critic LLM"
+    )
+    parser.add_argument(
+        "--coder-max-tokens", 
+        type=int, 
+        default=32000, 
+        help="Maximum number of tokens for the Coder LLM"
+    )
+    parser.add_argument(
+        "--critic-max-tokens", 
+        type=int, 
+        default=32000, 
+        help="Maximum number of tokens for the Critic LLM"
+    )
+    parser.add_argument(
+        "--max-iterations", 
+        type=int, 
+        default=5, 
+        help="Maximum number of self-healing iterations"
+    )
+    
+    args = parser.parse_args()
+
     # Example specification
     specification = (
         "Create a function that takes a list of numbers and returns "
@@ -346,12 +448,15 @@ def main():
         "that tests the function with [1, 2, 3, 4, 5, 6]."
     )
     
-    # Initialize agent (uses OpenAI GPT-4 by default)
-    # Change to model_provider="anthropic" and model_name="claude-3-5-sonnet-20241022" for Claude
+    # Initialize agent with command line arguments
     agent = SelfHealingAgent(
-        model_provider="openai",
-        model_name="gpt-4",
-        max_iterations=5
+        coder_model_provider=args.coder_provider,
+        coder_model_name=args.coder_model,
+        critic_model_provider=args.critic_provider,
+        critic_model_name=args.critic_model,
+        coder_max_tokens=args.coder_max_tokens,
+        critic_max_tokens=args.critic_max_tokens,
+        max_iterations=args.max_iterations
     )
     
     # Run the self-healing workflow
@@ -365,4 +470,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     main()

@@ -5,6 +5,7 @@ This file demonstrates various ways to use the agent for different code generati
 Note: You'll need to set up your API keys in a .env file before running these examples.
 """
 
+import logging
 from main import SelfHealingAgent
 
 
@@ -17,8 +18,10 @@ def example_1_simple_function():
     """
     
     agent = SelfHealingAgent(
-        model_provider="openai",
-        model_name="gpt-4",
+        coder_model_provider="openai",
+        coder_model_name="gpt-4",
+        critic_model_provider="openai",
+        critic_model_name="gpt-4",
         max_iterations=5
     )
     
@@ -40,8 +43,10 @@ def example_2_data_processing():
     """
     
     agent = SelfHealingAgent(
-        model_provider="openai",
-        model_name="gpt-4",
+        coder_model_provider="openai",
+        coder_model_name="gpt-4",
+        critic_model_provider="openai",
+        critic_model_name="gpt-4",
         max_iterations=5
     )
     
@@ -64,8 +69,10 @@ def example_3_file_operations():
     """
     
     agent = SelfHealingAgent(
-        model_provider="openai",
-        model_name="gpt-4",
+        coder_model_provider="openai",
+        coder_model_name="gpt-4",
+        critic_model_provider="openai",
+        critic_model_name="gpt-4",
         max_iterations=5
     )
     
@@ -82,8 +89,10 @@ def example_4_with_anthropic():
     """
     
     agent = SelfHealingAgent(
-        model_provider="anthropic",
-        model_name="claude-3-5-sonnet-20241022",
+        coder_model_provider="anthropic",
+        coder_model_name="claude-3-5-sonnet-20241022",
+        critic_model_provider="anthropic",
+        critic_model_name="claude-3-5-sonnet-20241022",
         max_iterations=5
     )
     
@@ -105,8 +114,10 @@ def example_5_complex_task():
     """
     
     agent = SelfHealingAgent(
-        model_provider="openai",
-        model_name="gpt-4",
+        coder_model_provider="openai",
+        coder_model_name="gpt-4",
+        critic_model_provider="openai",
+        critic_model_name="gpt-4",
         max_iterations=7  # More iterations for complex tasks
     )
     
@@ -115,6 +126,9 @@ def example_5_complex_task():
 
 
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
     print("Self-Healing Code Agent - Examples")
     print("=" * 60)
     print("\nThese examples demonstrate various use cases.")
