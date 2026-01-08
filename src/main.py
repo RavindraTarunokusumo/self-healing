@@ -1,396 +1,26 @@
-"""
-Self-Healing Code Agent using LangGraph
-
-This module implements an autonomous code generation and fixing system using LangGraph.
-The workflow follows a cyclic pattern: Coder -> Executor -> Critic, with each node
-capable of triggering iterations until the code is correct.
-
-Architecture:
-- Coder: Uses LLM to generate Python code based on a specification
-- Executor: Runs code in E2B sandbox and captures output/errors
-- Critic: Analyzes results and decides whether to iterate or complete
-"""
-
-import os
-import logging
 import argparse
 from datetime import datetime
-from typing import Literal, TypedDict
-import typing
-import typing_extensions
+import json
+import logging
+import sys
+import traceback
+from self_healing import SelfHealingAgent
+from benchmark_loaders import get_loader, list_benchmarks
 
-# Monkeypatch Self for Python < 3.11
-if not hasattr(typing, "Self"):
-    typing.Self = typing_extensions.Self
-from dotenv import load_dotenv
-from colorama import Fore, Style, init as colorama_init
-
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_qwq import ChatQwen
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
-from e2b_code_interpreter import Sandbox
-
-# Initialize colorama for colored output
-colorama_init(autoreset=True)
-
-# Load environment variables
-load_dotenv()
-
-
-class AgentState(TypedDict):
-    """State object that flows through the LangGraph workflow."""
-    specification: str  # Original code specification/requirements
-    code: str  # Current version of generated code
-    execution_output: str  # Output from code execution
-    execution_error: str  # Error messages if any
-    critic_feedback: str  # Feedback from the critic
-    iteration: int  # Current iteration count
-    max_iterations: int  # Maximum allowed iterations
-    is_complete: bool  # Whether the code is correct and complete
-
-
-class SelfHealingAgent:
-    """
-    Self-Healing Code Agent that generates, executes, and iteratively fixes code.
-    """
-    
-    def __init__(
-        self, 
-        coder_model_provider: Literal["openai", "anthropic", "qwen"] = "openai",
-        coder_model_name: str = "gpt-4",
-        critic_model_provider: Literal["openai", "anthropic", "qwen"] = "openai",
-        critic_model_name: str = "gpt-4",
-        coder_max_tokens: int = 32000,
-        critic_max_tokens: int = 32000,
-        max_iterations: int = 5
-    ):
-        """
-        Initialize the Self-Healing Agent.
-        
-        Args:
-            coder_model_provider: Provider for the Coder LLM ("openai", "anthropic", "qwen")
-            coder_model_name: Model name for the Coder LLM
-            critic_model_provider: Provider for the Critic LLM ("openai", "anthropic", "qwen")
-            critic_model_name: Model name for the Critic LLM
-            max_iterations: Maximum number of self-healing iterations
-        """
-        self.max_iterations = max_iterations
-        
-        # Initialize logger
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
-        
-        # Create logs directory
-        log_dir = os.path.join(os.getcwd(), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Create file handler with date-based filename
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        current_time = datetime.now().strftime("%H-%M-%S")
-        log_file = os.path.join(log_dir, f"{current_date}_{current_time}.log")
-        file_handler = logging.FileHandler(log_file)
-        
-        # Create formatter
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        
-        # Add handlers
-        self.logger.addHandler(file_handler)
-        
-        # Add stream handler
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        self.logger.addHandler(stream_handler)
-        
-        # Initialize the appropriate LLM for Coder and Critic
-        self.coder_llm = self._create_llm(coder_model_provider, coder_model_name, coder_max_tokens)
-        self.critic_llm = self._create_llm(critic_model_provider, critic_model_name, critic_max_tokens)
-        
-        # Build the LangGraph workflow
-        self.workflow = self._build_workflow()
-
-    def _create_llm(self, provider: str, model_name: str, max_tokens: int = 32000):
-        """Helper method to create LLM instances."""
-        if provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY not found in environment variables")
-            return ChatOpenAI(model=model_name, temperature=0.7, max_tokens=max_tokens)
-        elif provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
-            return ChatAnthropic(model=model_name, temperature=0.7, max_tokens=max_tokens)
-        elif provider == "qwen":
-            api_key = os.getenv("QWEN_API_KEY")
-            if not api_key:
-                raise ValueError("QWEN_API_KEY not found in environment variables")
-            return ChatQwen(model=model_name, api_key=api_key, temperature=0.7, max_tokens=max_tokens)  
-        else:
-            raise ValueError(f"Unsupported model provider: {provider}")
-    
-    def _build_workflow(self) -> StateGraph:
-        """
-        Build the cyclic LangGraph workflow: Coder -> Executor -> Critic.
-        
-        Returns:
-            Compiled StateGraph workflow
-        """
-        workflow = StateGraph(AgentState)
-        
-        # Add nodes
-        workflow.add_node("coder", self._coder_node)
-        workflow.add_node("executor", self._executor_node)
-        workflow.add_node("critic", self._critic_node)
-        
-        # Define edges
-        workflow.set_entry_point("coder")
-        workflow.add_edge("coder", "executor")
-        workflow.add_edge("executor", "critic")
-        
-        # Conditional edge from critic: either go back to coder or end
-        workflow.add_conditional_edges(
-            "critic",
-            self._should_continue,
-            {
-                "continue": "coder",
-                "end": END
-            }
-        )
-        
-        return workflow.compile()
-    
-    def _coder_node(self, state: AgentState) -> AgentState:
-        """
-        Coder Node: Creates or fixes Python code based on specification and feedback.
-        
-        Args:
-            state: Current agent state
-            
-        Returns:
-            Updated state with new/fixed code
-        """
-        self.logger.info(f"\n{Fore.CYAN}{'='*60}")
-        self.logger.info(f"{Fore.CYAN}Coder - Iteration {state['iteration'] + 1}")
-        self.logger.info(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-        
-        # Build prompt based on whether this is initial generation or fixing
-        if state["iteration"] == 0:
-            # Initial code generation
-            system_prompt = (
-                "You are an expert Python programmer. Generate clean, well-documented "
-                "Python code based on the given specification. Include proper error handling "
-                "and follow best practices."
-            )
-            user_prompt = f"Generate Python code for the following specification:\n\n{state['specification']}"
-        else:
-            # Code fixing based on feedback
-            system_prompt = (
-                "You are an expert Python programmer fixing code. Based on the execution "
-                "results and critic feedback, modify the code to fix all issues. "
-                "Only output the corrected Python code, no explanations."
-            )
-            user_prompt = (
-                f"Original specification:\n{state['specification']}\n\n"
-                f"Previous code:\n```python\n{state['code']}\n```\n\n"
-                f"Execution output:\n{state['execution_output']}\n\n"
-                f"Execution errors:\n{state['execution_error']}\n\n"
-                f"Critic feedback:\n{state['critic_feedback']}\n\n"
-                f"Fix the code based on the feedback above."
-            )
-        
-        # Generate code using LLM
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
-        ]
-        
-        response = self.coder_llm.invoke(messages)
-        generated_code = response.content
-        
-        # Extract code from markdown code blocks if present
-        if "```python" in generated_code:
-            generated_code = generated_code.split("```python")[1].split("```")[0].strip()
-        elif "```" in generated_code:
-            generated_code = generated_code.split("```")[1].split("```")[0].strip()
-        
-        self.logger.info(f"{Fore.GREEN}Generated Code:{Style.RESET_ALL}")
-        self.logger.info(generated_code)
-        
-        return {
-            **state,
-            "code": generated_code
-        }
-    
-    def _executor_node(self, state: AgentState) -> AgentState:
-        """
-        Executor Node: Runs the code in E2B sandbox and captures output.
-        
-        Args:
-            state: Current agent state
-            
-        Returns:
-            Updated state with execution results
-        """
-        self.logger.info(f"\n{Fore.YELLOW}{'='*60}")
-        self.logger.info(f"{Fore.YELLOW}EXECUTOR - Running code in sandbox")
-        self.logger.info(f"{Fore.YELLOW}{'='*60}{Style.RESET_ALL}")
-        
-        execution_output = ""
-        execution_error = ""
-        
-        try:
-            # Create E2B sandbox and execute code
-            with Sandbox.create() as sandbox:
-                execution = sandbox.run_code(state["code"])
-                
-                # Capture output and errors
-                if execution.logs:
-                    execution_output = execution.logs.stdout + execution.logs.stderr
-                
-                if execution.error:
-                    execution_error = f"Error: {execution.error.name}\n{execution.error.value}\n{execution.error.traceback}"
-                
-                if not execution_error and execution.results:
-                    # Capture any results from the execution
-                    execution_output += "\n" + str(execution.results)
-        
-        except Exception as e:
-            execution_error = f"Sandbox execution failed: {str(e)}"
-        
-        self.logger.info(f"{Fore.YELLOW}Execution Output:{Style.RESET_ALL}")
-        self.logger.info(execution_output if execution_output else "(no output)")
-        
-        if execution_error:
-            self.logger.info(f"{Fore.RED}Execution Errors:{Style.RESET_ALL}")
-            self.logger.info(execution_error)
-        
-        return {
-            **state,
-            "execution_output": execution_output,
-            "execution_error": execution_error
-        }
-    
-    def _critic_node(self, state: AgentState) -> AgentState:
-        """
-        Critic Node: Analyzes execution results and provides feedback.
-        
-        Args:
-            state: Current agent state
-            
-        Returns:
-            Updated state with critic feedback and completion status
-        """
-        self.logger.info(f"\n{Fore.MAGENTA}{'='*60}")
-        self.logger.info(f"{Fore.MAGENTA}CRITIC - Analyzing results")
-        self.logger.info(f"{Fore.MAGENTA}{'='*60}{Style.RESET_ALL}")
-        
-        # Build critic prompt
-        system_prompt = (
-            "You are a critical code reviewer. Analyze whether the code correctly "
-            "implements the specification and runs without errors. If there are issues, "
-            "provide specific, actionable feedback for fixing them. If the code is correct, "
-            "state 'APPROVED' clearly."
-        )
-        
-        user_prompt = (
-            f"Specification:\n{state['specification']}\n\n"
-            f"Generated code:\n```python\n{state['code']}\n```\n\n"
-            f"Execution output:\n{state['execution_output']}\n\n"
-            f"Execution errors:\n{state['execution_error']}\n\n"
-            f"Does this code correctly implement the specification? "
-            f"If not, what needs to be fixed?"
-        )
-        
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
-        ]
-        
-        response = self.critic_llm.invoke(messages)
-        feedback = response.content
-        
-        self.logger.info(f"{Fore.MAGENTA}Critic Feedback:{Style.RESET_ALL}")
-        self.logger.info(feedback)
-        
-        # Determine if code is complete (no errors and APPROVED by critic)
-        is_complete = (
-            not state["execution_error"] and 
-            "APPROVED" in feedback.upper()
-        )
-        
-        return {
-            **state,
-            "critic_feedback": feedback,
-            "iteration": state["iteration"] + 1,
-            "is_complete": is_complete
-        }
-    
-    def _should_continue(self, state: AgentState) -> Literal["continue", "end"]:
-        """
-        Decide whether to continue iterating or end the workflow.
-        
-        Args:
-            state: Current agent state
-            
-        Returns:
-            "continue" to iterate again, "end" to stop
-        """
-        if state["is_complete"]:
-            self.logger.info(f"\n{Fore.GREEN}✓ Code approved! Workflow complete.{Style.RESET_ALL}")
-            return "end"
-        
-        if state["iteration"] >= state["max_iterations"]:
-            self.logger.info(f"\n{Fore.RED}✗ Max iterations reached. Workflow ending.{Style.RESET_ALL}")
-            return "end"
-        
-        self.logger.info(f"\n{Fore.YELLOW}→ Continuing to next iteration...{Style.RESET_ALL}")
-        return "continue"
-    
-    def run(self, specification: str) -> AgentState:
-        """
-        Run the self-healing agent on a code specification.
-        
-        Args:
-            specification: Natural language description of desired code
-            
-        Returns:
-            Final agent state with generated code and results
-        """
-        self.logger.info(f"\n{Fore.BLUE}{'='*60}")
-        self.logger.info(f"{Fore.BLUE}SELF-HEALING CODE AGENT")
-        self.logger.info(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
-        self.logger.info(f"\nSpecification: {specification}\n")
-        
-        initial_state: AgentState = {
-            "specification": specification,
-            "code": "",
-            "execution_output": "",
-            "execution_error": "",
-            "critic_feedback": "",
-            "iteration": 0,
-            "max_iterations": self.max_iterations,
-            "is_complete": False
-        }
-        
-        final_state = self.workflow.invoke(initial_state)
-        
-        self.logger.info(f"\n{Fore.BLUE}{'='*60}")
-        self.logger.info(f"{Fore.BLUE}FINAL RESULTS")
-        self.logger.info(f"{Fore.BLUE}{'='*60}{Style.RESET_ALL}")
-        self.logger.info(f"\nTotal iterations: {final_state['iteration']}")
-        self.logger.info(f"Status: {'✓ Complete' if final_state['is_complete'] else '✗ Incomplete'}")
-        self.logger.info(f"\nFinal code:\n{Fore.GREEN}{final_state['code']}{Style.RESET_ALL}")
-        
-        return final_state
+# Initialize logger (configure with args later)
+logger = logging.getLogger(__name__)
 
 
 def main():
     """
-    Example usage of the Self-Healing Code Agent.
+    Main usage of the Self-Healing Code Agent.
     """
+    logger.info("=" * 60)
+    logger.info("SELF-HEALING CODE AGENT - Starting")
+    logger.info("=" * 60)
+    logger.debug(f"Python version: {sys.version}")
+    logger.debug(f"Command line args: {sys.argv}")
+    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run the Self-Healing Code Agent")
     
@@ -410,14 +40,14 @@ def main():
     parser.add_argument(
         "--critic-provider", 
         type=str, 
-        default="openai", 
+        default="qwen", 
         choices=["openai", "anthropic", "qwen"], 
         help="Provider for the Critic LLM"
     )
     parser.add_argument(
         "--critic-model", 
         type=str, 
-        default="gpt-4", 
+        default="qwen", 
         help="Model name for the Critic LLM"
     )
     parser.add_argument(
@@ -433,43 +63,318 @@ def main():
         help="Maximum number of tokens for the Critic LLM"
     )
     parser.add_argument(
-        "--max-iterations", 
-        type=int, 
-        default=5, 
+        "--max-iterations",
+        type=int,
+        default=5,
         help="Maximum number of self-healing iterations"
     )
-    
+
+    # Benchmark arguments
+    parser.add_argument(
+        "--benchmark",
+        type=str,
+        choices=list_benchmarks(),
+        help=f"Benchmark to load problems from. Available: {', '.join(list_benchmarks())}"
+    )
+    parser.add_argument(
+        "--benchmark-path",
+        type=str,
+        help="Path to benchmark data file (JSONL format)"
+    )
+    parser.add_argument(
+        "--from-hub",
+        action="store_true",
+        help="Load benchmark directly from HuggingFace Hub"
+    )
+    parser.add_argument(
+        "--task-id",
+        type=str,
+        help="Specific task ID to run (e.g., 'HumanEval/0')"
+    )
+    parser.add_argument(
+        "--num-problems",
+        type=int,
+        default=1,
+        help="Number of benchmark problems to run (default: 1)"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="Output file path for benchmark results (JSON format)"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    )
+
     args = parser.parse_args()
-
-    # Example specification
-    specification = (
-        "Create a function that takes a list of numbers and returns "
-        "the sum of all even numbers in the list. Include a main block "
-        "that tests the function with [1, 2, 3, 4, 5, 6]."
-    )
     
+    logging.basicConfig(
+    level=getattr(logging, args.log_level),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    logger.info("Parsed arguments:")
+    logger.info(f"  benchmark: {args.benchmark}")
+    logger.info(f"  from_hub: {args.from_hub}")
+    logger.info(f"  task_id: {args.task_id}")
+    logger.info(f"  benchmark_path: {args.benchmark_path}")
+    logger.info(f"  num_problems: {args.num_problems}")
+    logger.info(f"  coder_provider: {args.coder_provider}")
+    logger.info(f"  coder_model: {args.coder_model}")
+    logger.info(f"  critic_provider: {args.critic_provider}")
+    logger.info(f"  critic_model: {args.critic_model}")
+    logger.info(f"  max_iterations: {args.max_iterations}")
+
     # Initialize agent with command line arguments
-    agent = SelfHealingAgent(
-        coder_model_provider=args.coder_provider,
-        coder_model_name=args.coder_model,
-        critic_model_provider=args.critic_provider,
-        critic_model_name=args.critic_model,
-        coder_max_tokens=args.coder_max_tokens,
-        critic_max_tokens=args.critic_max_tokens,
-        max_iterations=args.max_iterations
-    )
+    logger.info("Initializing SelfHealingAgent...")
+    try:
+        agent = SelfHealingAgent(
+            coder_model_provider=args.coder_provider,
+            coder_model_name=args.coder_model,
+            critic_model_provider=args.critic_provider,
+            critic_model_name=args.critic_model,
+            coder_max_tokens=args.coder_max_tokens,
+            critic_max_tokens=args.critic_max_tokens,
+            max_iterations=args.max_iterations
+        )
+        logger.info("SelfHealingAgent initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize SelfHealingAgent: {e}")
+        logger.error(traceback.format_exc())
+        return
+
+    # Load benchmark problems if specified
+    if args.benchmark:
+        logger.info(f"Running in benchmark mode: {args.benchmark}")
+        try:
+            results = run_benchmark(agent, args)
+            logger.info(f"Benchmark completed. Results count: {len(results)}")
+            if args.output:
+                save_results(results, args.output)
+            print_benchmark_summary(results[1]["problems_results"])
+        except Exception as e:
+            logger.error(f"Benchmark execution failed: {e}")
+            logger.error(traceback.format_exc())
+    else:
+        # Run with a manual specification
+        logger.info("Running in manual specification mode")
+        problem = None
+        if problem is None:
+            logger.warning("No problem specified")
+            print("No problem specified. Use --benchmark to load from a benchmark,")
+            print("or modify the 'problem' variable in main.py.")
+            return
+        
+        # Add manual run logic here if needed
+        result = agent.run(problem)
+        print_benchmark_summary([result])
+
+
+def run_benchmark(agent: SelfHealingAgent, args) -> list:
+    """
+    Run the agent on benchmark problems.
+
+    Args:
+        agent: The SelfHealingAgent instance
+        args: Parsed command line arguments
+
+    Returns:
+        List of results for each problem
+    """
+    logger.info(f"run_benchmark() called with benchmark={args.benchmark}")
+
+    logger.debug("Getting benchmark loader...")
+    loader = get_loader(args.benchmark)
+    logger.info(f"Got loader for: {loader.name}")
+    print(f"\nLoading {loader.name} benchmark...")
+
+    # Load problems from file or HuggingFace Hub
+    if args.from_hub:
+        logger.info("Loading from HuggingFace Hub...")
+        try:
+            problems = loader.load_from_hub()
+            logger.info(f"Successfully loaded {len(problems)} problems from Hub")
+        except Exception as e:
+            logger.error(f"Failed to load from Hub: {e}")
+            logger.error(traceback.format_exc())
+            raise
+    elif args.benchmark_path:
+        logger.info(f"Loading from file: {args.benchmark_path}")
+        problems = loader.load(args.benchmark_path)
+    else:
+        logger.error("No data source specified (need --from-hub or --benchmark-path)")
+        print("Error: Specify --benchmark-path or use --from-hub")
+        return []
+
+    print(f"Loaded {len(problems)} problems")
+    logger.info(f"Total problems loaded: {len(problems)}")
+
+    # Filter to specific task if requested
+    if args.task_id:
+        logger.info(f"Filtering for task_id: {args.task_id}")
+        problems = [p for p in problems if p.task_id == args.task_id]
+        logger.info(f"After filtering: {len(problems)} problems")
+        if not problems:
+            logger.error(f"Task ID '{args.task_id}' not found in dataset")
+            print(f"Error: Task ID '{args.task_id}' not found")
+            return []
+
+    # Limit number of problems
+    problems = problems[:args.num_problems]
+    logger.info(f"Running {len(problems)} problem(s)")
+    print(f"Running {len(problems)} problem(s)...\n")
+
+    # Metadata of the benchmark run
+    results = [{
+        "benchmark_run_metadata": {
+            "benchmark": args.benchmark,
+            "from_hub": args.from_hub,
+            "benchmark_path": args.benchmark_path,
+            "task_id": args.task_id,
+            "num_problems": args.num_problems,
+            "timestamp": datetime.now().isoformat()
+        },
+        "models_metadata": {
+            "coder_provider": args.coder_provider,
+            "coder_model": args.coder_model,
+            "critic_provider": args.critic_provider,
+            "critic_model": args.critic_model,
+            "coder_max_tokens": args.coder_max_tokens,
+            "critic_max_tokens": args.critic_max_tokens,
+            "max_iterations": args.max_iterations
+        }
+    }]
     
-    # Run the self-healing workflow
-    result = agent.run(specification)
-    
-    # Access final code
+    # Store problems
+    results.append({"problems_results": []})
+
+    for i, problem in enumerate(problems):
+        logger.info(f"Processing problem {i+1}/{len(problems)}: {problem.task_id}")
+        print(f"\n{'='*60}")
+        print(f"Problem {i+1}/{len(problems)}: {problem.task_id}")
+        print(f"Entry point: {problem.entry_point}")
+        print(f"{'='*60}")
+
+        logger.debug(f"Prompt length: {len(problem.prompt)} chars")
+        logger.debug(f"Test code length: {len(problem.test_code)} chars")
+        logger.debug(f"Entry point: {problem.entry_point}")
+
+        logger.info("Calling agent.run()...")
+        try:
+            result = agent.run(
+                specification=problem.prompt,
+                test_code=problem.test_code,
+                entry_point=problem.entry_point
+            )
+            logger.info(f"agent.run() completed. is_complete={result['is_complete']}, iterations={result['iteration']}")
+        except Exception as e:
+            logger.error(f"agent.run() failed: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+        results[1]["problems_results"].append({
+            "task_id": problem.task_id,
+            "entry_point": problem.entry_point,
+            "prompt": problem.prompt,
+            "generated_code": result["code"],
+            "is_complete": result["is_complete"],
+            "iterations": result["iteration"],
+            "execution_output": result["execution_output"],
+            "execution_error": result["execution_error"],
+            "token_usage": result.get("token_usage", {})
+        })
+        logger.info(f"Problem {problem.task_id} result appended")
+
+    logger.info(f"run_benchmark() completed. Total results: {len(results)}")
+    return results
+
+
+def save_results(results: list, output_path: str):
+    """Save benchmark results to a JSON file."""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2)
+    print(f"\nResults saved to: {output_path}")
+
+
+def print_benchmark_summary(results: list):
+    """Print a summary of benchmark results."""
+    if not results:
+        return
+
+    total = len(results)
+    passed = sum(1 for r in results if r["is_complete"])
+    avg_iterations = sum(r["iterations"] for r in results) / total
+
+    # Aggregate token usage
+    total_coder_input = 0
+    total_coder_output = 0
+    total_coder_calls = 0
+    total_critic_input = 0
+    total_critic_output = 0
+    total_critic_calls = 0
+
+    for r in results:
+        token_usage = r.get("token_usage", {})
+        if token_usage:
+            coder = token_usage.get("coder", {})
+            critic = token_usage.get("critic", {})
+            total_coder_input += coder.get("input_tokens", 0)
+            total_coder_output += coder.get("output_tokens", 0)
+            total_coder_calls += coder.get("calls", 0)
+            total_critic_input += critic.get("input_tokens", 0)
+            total_critic_output += critic.get("output_tokens", 0)
+            total_critic_calls += critic.get("calls", 0)
+
     print(f"\n{'='*60}")
-    print("You can now use the generated code:")
+    print("BENCHMARK SUMMARY")
     print(f"{'='*60}")
-    print(result["code"])
+    print(f"Total problems: {total}")
+    print(f"Passed: {passed}/{total} ({100*passed/total:.1f}%)")
+    print(f"Average iterations: {avg_iterations:.2f}")
+    print(f"{'='*60}")
 
+    # Print token usage summary
+    print("\nTOKEN USAGE SUMMARY")
+    print(f"{'-'*60}")
+    total_coder = total_coder_input + total_coder_output
+    total_critic = total_critic_input + total_critic_output
+    grand_total = total_coder + total_critic
 
+    print(f"Coder:")
+    print(f"  Total tokens:   {total_coder:,}")
+    print(f"  Input tokens:   {total_coder_input:,}")
+    print(f"  Output tokens:  {total_coder_output:,}")
+    print(f"  Total calls:    {total_coder_calls}")
+    if total_coder_calls > 0:
+        print(f"  Avg tokens/call: {total_coder / total_coder_calls:,.1f}")
+
+    print(f"\nCritic:")
+    print(f"  Total tokens:   {total_critic:,}")
+    print(f"  Input tokens:   {total_critic_input:,}")
+    print(f"  Output tokens:  {total_critic_output:,}")
+    print(f"  Total calls:    {total_critic_calls}")
+    if total_critic_calls > 0:
+        print(f"  Avg tokens/call: {total_critic / total_critic_calls:,.1f}")
+
+    print(f"\nGrand Total: {grand_total:,} tokens")
+    print(f"{'='*60}")
+
+    # Print per-problem results
+    print("\nPer-problem results:")
+    for r in results:
+        status = "PASS" if r["is_complete"] else "FAIL"
+        token_usage = r.get("token_usage", {})
+        total_tokens = token_usage.get("total", {}).get("total_tokens", 0)
+        print(f"  {r['task_id']}: {status} (iterations: {r['iterations']}, tokens: {total_tokens:,})")
+        
+        
 if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error("An unhandled exception occurred:")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
