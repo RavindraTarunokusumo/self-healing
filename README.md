@@ -4,36 +4,40 @@ An autonomous, iterative Python code generation and fixing system using **LangGr
 
 ## 🎯 Overview
 
-This project implements a self-healing code agent that automatically generates, executes, and fixes Python code through a cyclic workflow. The agent uses Large Language Models (OpenAI/Anthropic) for code generation and critique, and E2B sandboxes for safe code execution.
+This project implements a self-healing code agent that automatically generates, executes, and fixes Python code through a cyclic workflow. The agent uses Large Language Models (OpenAI/Anthropic/Qwen) for code generation and critique, and E2B sandboxes for safe code execution.
+
+**Research Focus**: This project explores the cost-benefit analysis of using self-healing frameworks with multiple LLM iterations versus single-shot approaches with expensive frontier models. By combining cheaper models in a coder-critic loop with intelligent safeguards, the framework aims to match or exceed the quality of expensive models while potentially reducing total token costs.
 
 ### Architecture
 
 The agent follows a **cyclic three-node workflow** implemented with LangGraph:
 
 ```
-┌─────────────┐
-│  Generator  │  - Generates or fixes Python code using LLM
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Executor   │  - Runs code in E2B sandbox
-└──────┬──────┘  - Captures output and errors
-       │
-       ▼
-┌─────────────┐
-│   Critic    │  - Analyzes results and provides feedback
-└──────┬──────┘  - Decides: iterate or complete
-       │
-       ▼
-    [Loop back to Generator if needed]
+     ┌─────────────┐
+┌──► │  Generator  │  - Generates or fixes Python code using LLM
+│    └──────┬──────┘
+│           │
+│           ▼
+│    ┌─────────────┐
+│    │  Executor   │  - Runs code in E2B sandbox
+│    └──────┬──────┘  - Captures output and errors
+│           │
+│           ▼
+│    ┌─────────────┐
+│    │   Critic    │  - Analyzes results and provides feedback
+│    └──────┬──────┘  - Decides: iterate or complete
+└───────────┤
+            ▼
+       [PASS/FAIL]
 ```
 
 **Key Features:**
 - **Autonomous**: Iteratively fixes code without human intervention
 - **Safe Execution**: Uses E2B sandboxes for isolated code execution
 - **Reflexion Pattern**: Critic provides feedback that guides the next iteration
-- **Configurable**: Supports OpenAI, Anthropic and Qwen models.
+- **Intelligent Safeguards**: Detects stuck states and truncated responses to prevent wasted iterations
+- **Configurable**: Supports OpenAI, Anthropic and Qwen models with flexible termination policies
+- **Cost-Aware**: Tracks token usage and costs with early termination options
 - **Research-Oriented**: Designed for experimentation with self-correction techniques
 
 ## 🚀 Quick Start
@@ -71,26 +75,35 @@ echo "E2B_API_KEY=your_e2b_key_here" >> .env
 **Basic Usage:**
 
 ```python
-from main import SelfHealingAgent
+from self_healing import SelfHealingAgent
 
-# Create an agent
+# Create an agent with safeguards
 agent = SelfHealingAgent(
-    model_provider="openai",  # or "anthropic"
-    model_name="gpt-4",       # or "claude-3-5-sonnet-20241022"
-    max_iterations=5
+    coder_model_provider="openai",
+    coder_model_name="gpt-4",
+    critic_model_provider="openai",
+    critic_model_name="gpt-4",
+    coder_max_tokens=1024,              # Adjust as needed
+    critic_max_tokens=4096,             # Adjust as needed
+    max_iterations=5,
+    enable_stuck_detection=True,        # Enable stuck detection
+    early_termination_on_stuck=True     # Terminate if stuck
 )
 
 # Define what you want to build
 specification = """
-Create a function that takes a list of numbers and returns 
+Create a function that takes a list of numbers and returns
 the sum of all even numbers in the list.
 """
 
 # Run the self-healing workflow
 result = agent.run(specification)
 
-# Access the final code
+# Access the final code and results
 print(result["code"])
+print(f"Completed: {result['is_complete']}")
+print(f"Termination reason: {result['termination_reason']}")
+print(f"Iterations: {result['iteration']}")
 ```
 
 **Run the example:**
@@ -135,21 +148,30 @@ The `AgentState` TypedDict tracks information across nodes:
 {
     "specification": str,      # Original requirements
     "code": str,              # Current code version
+    "test_code": str,         # Unit tests (from benchmarks)
+    "entry_point": str,       # Function name to implement
     "execution_output": str,  # Sandbox output
     "execution_error": str,   # Error messages
     "critic_feedback": str,   # Critique and suggestions
+    "feedback_history": list, # All feedback for stuck detection
     "iteration": int,         # Current iteration count
     "max_iterations": int,    # Iteration limit
-    "is_complete": bool       # Success flag
+    "is_complete": bool,      # Success flag
+    "termination_reason": str # Why workflow ended
 }
 ```
 
 ### Workflow Control
 
-The workflow uses conditional edges to control iteration:
+The workflow uses conditional edges to control iteration based on multiple conditions (checked in order):
 
-- **Continue**: If code has errors and max iterations not reached
-- **End**: If code is approved OR max iterations reached
+1. **Code Approved** → End workflow (termination_reason: "approved")
+2. **Response Truncated** (with early termination enabled) → End workflow (termination_reason: "truncated")
+3. **Stuck State Detected** (with early termination enabled) → End workflow (termination_reason: "stuck")
+4. **Max Iterations Reached** → End workflow (termination_reason: "max_iterations")
+5. **Otherwise** → Continue to next iteration
+
+The `termination_reason` field enables detailed analytics on why workflows ended, which is crucial for cost-benefit analysis.
 
 ## 🔧 Configuration
 
@@ -181,15 +203,170 @@ Adjust `max_iterations` to control how many times the agent will attempt to fix 
 agent = SelfHealingAgent(max_iterations=10)  # More attempts for complex tasks
 ```
 
+### Critic Feedback Safeguards
+
+The agent includes intelligent safeguards to prevent wasted tokens when the critic cannot provide useful feedback.
+
+**Problem**: When the critic cannot find a solution, it may exhaust its token limit reasoning without returning actionable feedback, wasting tokens on unproductive iterations.
+
+**Solution**: Two detection mechanisms with configurable early termination:
+
+#### 1. Truncation Detection
+
+Detects when the critic's response is truncated due to hitting token limits:
+
+```python
+agent = SelfHealingAgent(
+    critic_max_tokens=4000,
+    early_termination_on_truncation=True  # End immediately if truncated
+)
+```
+
+- Checks `finish_reason` (OpenAI/Qwen) or `stop_reason` (Anthropic) metadata
+- Appends `[TRUNCATED]` marker to feedback for visibility
+- Optionally terminates workflow early to save costs
+
+#### 2. Stuck State Detection
+
+Identifies when the critic provides identical feedback repeatedly:
+
+```python
+agent = SelfHealingAgent(
+    enable_stuck_detection=True,           # Track feedback history
+    stuck_detection_threshold=2,           # 2 identical feedbacks = stuck
+    early_termination_on_stuck=True        # End immediately if stuck
+)
+```
+
+- Tracks all critic feedback when enabled
+- Compares last N feedbacks (configurable threshold)
+- Normalizes feedback (strip whitespace, lowercase) to avoid false positives
+- Optionally terminates early or warns and continues
+
+#### CLI Usage
+
+```bash
+# Enable all safeguards
+python src/main.py --benchmark humaneval --from-hub \
+    --enable-stuck-detection --stuck-threshold 2 \
+    --early-termination-on-stuck \
+    --early-termination-on-truncation
+
+# Stuck detection without early termination (warns only)
+python src/main.py --benchmark humaneval --from-hub \
+    --enable-stuck-detection
+
+# Early termination on truncation only
+python src/main.py --benchmark humaneval --from-hub \
+    --early-termination-on-truncation
+```
+
+#### Benefits
+
+- **Cost Savings**: Early termination prevents wasted iterations on unsolvable problems
+- **Better Analytics**: Track termination reasons to understand failure modes
+- **Configurable**: Tune aggressiveness based on your cost/success trade-offs
+- **Backward Compatible**: All features opt-in, default behavior unchanged
+
+## 📊 Benchmarking
+
+The agent supports running on standard coding benchmarks for evaluation:
+
+### Supported Benchmarks
+
+- **HumanEval**: OpenAI's 164 function completion problems
+- **MBPP**: Google's Mostly Basic Python Problems dataset
+
+### Running Benchmarks
+
+```bash
+# Run HumanEval from HuggingFace Hub
+python src/main.py --benchmark humaneval --from-hub
+
+# Run specific problem
+python src/main.py --benchmark humaneval --from-hub --task-id "HumanEval/0"
+
+# Run first 10 problems with safeguards
+python src/main.py --benchmark humaneval --from-hub --num-problems 10 \
+    --enable-stuck-detection --early-termination-on-stuck \
+    --output results.json
+
+# Compare different model combinations
+python src/main.py --benchmark humaneval --from-hub \
+    --coder-provider openai --coder-model gpt-3.5-turbo \
+    --critic-provider anthropic --critic-model claude-3-5-sonnet-20241022 \
+    --output gpt35_claude.json
+```
+
+### Benchmark Results
+
+Results are saved in JSON format with detailed information:
+
+```json
+{
+    "benchmark_run_metadata": {
+        "benchmark": "humaneval",
+        "from_hub": true,
+        "benchmark_path": null,
+        "task_id": null,
+        "num_problems": 164,
+        "num_problems_requested": null,
+        "timestamp": "2026-01-13T22:14:51.109239"
+  },
+    "models_metadata": {
+        "coder_provider": "qwen",
+        "coder_model": "qwen-flash",
+        "critic_provider": "qwen",
+        "critic_model": "qwen3-max",
+        "coder_max_tokens": 1024,
+        "critic_max_tokens": 8192,
+        "coder_temperature": 0.7,
+        "critic_temperature": 0.7,
+        "max_iterations": 5
+  }
+},
+{
+    "problems_results": [
+    {
+        "task_id": "HumanEval/0",
+        "entry_point": "has_closed_elements",
+        "is_complete": true,
+        "termination_reason": "approved",
+        "iterations": 2,
+        "token_usage": {...},
+        "cost": {...}
+    },
+  ]
+},
+{
+    "benchmark_summary": {
+        "problems": {...},
+        "iterations": {...},
+        "termination_reasons": {...},
+        "token_usage": {...},
+        "cost": {...}
+    }
+}
+```
+
+The summary includes:
+- Pass rate and average iterations
+- Total token usage (coder vs. critic)
+- Total cost breakdown by model
+- Per-problem termination reasons for failure analysis
+
 ## 📊 Research Applications
 
 This framework is designed for research in:
 
 1. **Self-Correction Mechanisms**: Study how LLMs improve code through iterative feedback
 2. **Reflexion Patterns**: Analyze how critique influences subsequent generations
-3. **Multi-Agent Systems**: Extend to multiple specialized agents (e.g., security checker, optimizer)
-4. **Agent Reliability**: Measure success rates across different specifications
-5. **Prompt Engineering**: Experiment with different prompting strategies
+3. **Cost-Benefit Analysis**: Compare single expensive model vs. self-healing with cheaper models
+4. **Failure Mode Analysis**: Study why critics fail (stuck states vs. truncation vs. max iterations)
+5. **Early Termination Policies**: Experiment with different termination strategies and thresholds
+6. **Multi-Agent Systems**: Extend to multiple specialized agents (e.g., security checker, optimizer)
+7. **Agent Reliability**: Measure success rates across different specifications and model combinations
+8. **Prompt Engineering**: Experiment with different prompting strategies
 
 ### Extending the Framework
 
@@ -268,12 +445,16 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔮 Future Directions
 
+- [x] Critic feedback safeguards (truncation and stuck state detection)
+- [x] Cost tracking and termination reason analytics
+- [ ] Adaptive termination policies based on problem difficulty
+- [ ] Code similarity detection (beyond identical feedback)
 - [ ] Add more specialized nodes (optimizer, security checker, tester)
 - [ ] Implement multi-language support (JavaScript, Go, etc.)
 - [ ] Add memory/learning capabilities across sessions
 - [ ] Integrate with local code editors via LSP
 - [ ] Build web interface for easier experimentation
-- [ ] Collect and analyze success metrics for research
+- [ ] Automated benchmark comparison across different configurations
 - [ ] Support for multi-file projects
 
 ## 📧 Contact
