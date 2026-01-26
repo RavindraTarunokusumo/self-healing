@@ -4,7 +4,7 @@ An autonomous, iterative Python code generation and fixing system using **LangGr
 
 ## 🎯 Overview
 
-This project implements a self-healing code agent that automatically generates, executes, and fixes Python code through a cyclic workflow. The agent uses Large Language Models (OpenAI/Anthropic/Qwen) for code generation and critique, and E2B sandboxes for safe code execution.
+This project implements a self-healing code agent that automatically generates, executes, and fixes Python code through a cyclic workflow. The agent uses LLMs for code generation and critique, and E2B sandboxes for safe code execution.
 
 **Research Focus**: This project explores the cost-benefit analysis of using self-healing frameworks with multiple LLM iterations versus single-shot approaches with expensive frontier models. By combining cheaper models in a coder-critic loop with intelligent safeguards, the framework aims to match or exceed the quality of expensive models while potentially reducing total token costs.
 
@@ -47,7 +47,7 @@ The agent follows a **cyclic three-node workflow** implemented with LangGraph:
 ### Prerequisites
 
 - Python 3.9 or higher
-- API keys for LLM provider (OpenAI, Anthropic or Qwen)
+- API keys for LLM provider
 - E2B API key for sandbox execution
 
 ### Installation
@@ -66,9 +66,9 @@ pip install -r requirements.txt
 3. Set up environment variables:
 ```bash
 # Create a .env file with your API keys
+echo "QWEN_API_KEY=your_qwen_key_here" >> .env
 echo "OPENAI_API_KEY=your_openai_key_here" > .env
 echo "ANTHROPIC_API_KEY=your_anthropic_key_here" >> .env
-echo "QWEN_API_KEY=your_qwen_key_here" >> .env
 echo "E2B_API_KEY=your_e2b_key_here" >> .env
 ```
 
@@ -79,19 +79,17 @@ echo "E2B_API_KEY=your_e2b_key_here" >> .env
 ```python
 from self_healing import SelfHealingAgent
 
-# Create an agent with safeguards
+# Create an agent with safeguards (Default CLI arguments)
 agent = SelfHealingAgent(
-    coder_model_provider="openai",
-    coder_model_name="gpt-4",
-    critic_model_provider="openai",
-    critic_model_name="gpt-4",
+    coder_model_provider="qwen",
+    coder_model_name="qwen-flash",
+    critic_model_provider="qwen",
+    critic_model_name="qwen3-max",      # Use a more powerful model for the critic
     coder_max_tokens=1024,              # Adjust as needed
     critic_max_tokens=4096,             # Adjust as needed
     coder_temperature=0.7,              # Temperature for code generation
     critic_temperature=0.7,             # Temperature for code review
     max_iterations=5,
-    enable_stuck_detection=True,        # Enable stuck detection
-    early_termination_on_stuck=True     # Terminate if stuck
 )
 
 # Define what you want to build
@@ -124,7 +122,6 @@ python main.py
 
 - **First iteration**: Generates code from scratch based on the specification
 - **Subsequent iterations**: Fixes code based on execution results and critic feedback
-- Uses LLM (GPT-4 or Claude) with temperature 0.7 for creativity
 
 ### 2. Executor Node
 
@@ -183,11 +180,11 @@ The `termination_reason` field enables detailed analytics on why workflows ended
 
 ### Model Providers
 
-**OpenAI:**
+**Qwen:**
 ```python
 agent = SelfHealingAgent(
-    model_provider="openai",
-    model_name="gpt-4",  # or "gpt-3.5-turbo", "gpt-4-turbo"
+    model_provider="qwen",
+    model_name="qwen-flash",
     max_iterations=5
 )
 ```
@@ -196,7 +193,7 @@ agent = SelfHealingAgent(
 ```python
 agent = SelfHealingAgent(
     model_provider="anthropic",
-    model_name="claude-3-5-sonnet-20241022",  # or other Claude models
+    model_name="claude-3-5-sonnet-20241022",
     max_iterations=5
 )
 ```
@@ -206,7 +203,7 @@ agent = SelfHealingAgent(
 Adjust `max_iterations` to control how many times the agent will attempt to fix the code:
 
 ```python
-agent = SelfHealingAgent(max_iterations=10)  # More attempts for complex tasks
+agent = SelfHealingAgent(max_iterations=5)  # More attempts for complex tasks
 ```
 
 ### Critic Feedback Safeguards
@@ -240,7 +237,7 @@ Detects when the critic's response is truncated due to hitting token limits:
 
 ```python
 agent = SelfHealingAgent(
-    critic_max_tokens=4000,
+    critic_max_tokens=4096,
     early_termination_on_truncation=True  # End immediately if truncated
 )
 ```
@@ -406,7 +403,7 @@ python scripts/visualize_results.py --format both
 
 ## 📈 Results
 
-Comprehensive comparison study on HumanEval benchmark (164 problems, 5 runs per configuration):
+Comprehensive comparison study using the Qwen family of models on the HumanEval benchmark (164 problems, 5 runs per configuration):
 
 ### Performance Metrics
 

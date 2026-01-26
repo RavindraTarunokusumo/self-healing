@@ -28,14 +28,14 @@ def main():
     parser.add_argument(
         "--coder-provider", 
         type=str, 
-        default="openai", 
+        default="qwen", 
         choices=["openai", "anthropic", "qwen"], 
         help="Provider for the Coder LLM"
     )
     parser.add_argument(
         "--coder-model", 
         type=str, 
-        default="gpt-4", 
+        default="qwen-flash", 
         help="Model name for the Coder LLM"
     )
     parser.add_argument(
@@ -48,19 +48,19 @@ def main():
     parser.add_argument(
         "--critic-model", 
         type=str, 
-        default="qwen", 
+        default="qwen3-max", 
         help="Model name for the Critic LLM"
     )
     parser.add_argument(
         "--coder-max-tokens", 
         type=int, 
-        default=32000, 
+        default=1024, 
         help="Maximum number of tokens for the Coder LLM"
     )
     parser.add_argument(
         "--critic-max-tokens", 
         type=int, 
-        default=32000, 
+        default=4096, 
         help="Maximum number of tokens for the Critic LLM"
     )
     parser.add_argument(
