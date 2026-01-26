@@ -38,6 +38,8 @@ The agent follows a **cyclic three-node workflow** implemented with LangGraph:
 - **Intelligent Safeguards**: Detects stuck states and truncated responses to prevent wasted iterations
 - **Configurable**: Supports OpenAI, Anthropic and Qwen models with flexible termination policies
 - **Cost-Aware**: Tracks token usage and costs with early termination options
+- **Statistical Analysis**: Multi-run benchmarking with 95% confidence intervals
+- **Visualization**: 4-panel dashboard for cost-performance comparison
 - **Research-Oriented**: Designed for experimentation with self-correction techniques
 
 ## 🚀 Quick Start
@@ -85,6 +87,8 @@ agent = SelfHealingAgent(
     critic_model_name="gpt-4",
     coder_max_tokens=1024,              # Adjust as needed
     critic_max_tokens=4096,             # Adjust as needed
+    coder_temperature=0.7,              # Temperature for code generation
+    critic_temperature=0.7,             # Temperature for code review
     max_iterations=5,
     enable_stuck_detection=True,        # Enable stuck detection
     early_termination_on_stuck=True     # Terminate if stuck
@@ -146,18 +150,19 @@ The `AgentState` TypedDict tracks information across nodes:
 
 ```python
 {
-    "specification": str,      # Original requirements
-    "code": str,              # Current code version
-    "test_code": str,         # Unit tests (from benchmarks)
-    "entry_point": str,       # Function name to implement
-    "execution_output": str,  # Sandbox output
-    "execution_error": str,   # Error messages
-    "critic_feedback": str,   # Critique and suggestions
-    "feedback_history": list, # All feedback for stuck detection
-    "iteration": int,         # Current iteration count
-    "max_iterations": int,    # Iteration limit
-    "is_complete": bool,      # Success flag
-    "termination_reason": str # Why workflow ended
+    "specification": str,           # Original requirements
+    "code": str,                   # Current code version
+    "test_code": str,              # Unit tests (from benchmarks)
+    "entry_point": str,            # Function name to implement
+    "execution_output": str,       # Sandbox output
+    "execution_error": str,        # Error messages
+    "is_infrastructure_error": bool, # Infrastructure error flag
+    "critic_feedback": str,        # Critique and suggestions
+    "feedback_history": list,      # All feedback for stuck detection
+    "iteration": int,              # Current iteration count
+    "max_iterations": int,         # Iteration limit
+    "is_complete": bool,           # Success flag
+    "termination_reason": str      # Why workflow ended
 }
 ```
 
@@ -166,10 +171,11 @@ The `AgentState` TypedDict tracks information across nodes:
 The workflow uses conditional edges to control iteration based on multiple conditions (checked in order):
 
 1. **Code Approved** → End workflow (termination_reason: "approved")
-2. **Response Truncated** (with early termination enabled) → End workflow (termination_reason: "truncated")
-3. **Stuck State Detected** (with early termination enabled) → End workflow (termination_reason: "stuck")
-4. **Max Iterations Reached** → End workflow (termination_reason: "max_iterations")
-5. **Otherwise** → Continue to next iteration
+2. **Infrastructure Error** → End workflow (termination_reason: "infrastructure_error", always terminates)
+3. **Response Truncated** (with early termination enabled) → End workflow (termination_reason: "truncated")
+4. **Stuck State Detected** (with early termination enabled) → End workflow (termination_reason: "stuck")
+5. **Max Iterations Reached** → End workflow (termination_reason: "max_iterations")
+6. **Otherwise** → Continue to next iteration
 
 The `termination_reason` field enables detailed analytics on why workflows ended, which is crucial for cost-benefit analysis.
 
@@ -207,11 +213,28 @@ agent = SelfHealingAgent(max_iterations=10)  # More attempts for complex tasks
 
 The agent includes intelligent safeguards to prevent wasted tokens when the critic cannot provide useful feedback.
 
-**Problem**: When the critic cannot find a solution, it may exhaust its token limit reasoning without returning actionable feedback, wasting tokens on unproductive iterations.
+**Problem**: When the critic cannot find a solution, it may exhaust its token limit reasoning without returning actionable feedback, wasting tokens on unproductive iterations. Additionally, infrastructure errors (E2B/network failures) should not waste tokens on critic analysis.
 
-**Solution**: Two detection mechanisms with configurable early termination:
+**Solution**: Three detection mechanisms with configurable early termination:
 
-#### 1. Truncation Detection
+#### 1. Infrastructure Error Detection
+
+Detects E2B/network errors and skips the critic LLM call entirely to save tokens:
+
+```python
+agent = SelfHealingAgent(
+    # No configuration needed - always active
+    # Detects: 403, 401, 402, 429, 500, 502, 503, 504, "sandbox execution failed"
+)
+```
+
+- Checks execution errors for infrastructure patterns
+- Sets `is_infrastructure_error=True` to skip critic entirely
+- Always terminates immediately (no configuration needed)
+- Saves critic LLM tokens on problems that cannot run
+- Termination reason: `infrastructure_error`
+
+#### 2. Truncation Detection
 
 Detects when the critic's response is truncated due to hitting token limits:
 
@@ -226,7 +249,7 @@ agent = SelfHealingAgent(
 - Appends `[TRUNCATED]` marker to feedback for visibility
 - Optionally terminates workflow early to save costs
 
-#### 2. Stuck State Detection
+#### 3. Stuck State Detection
 
 Identifies when the critic provides identical feedback repeatedly:
 
@@ -355,6 +378,40 @@ The summary includes:
 - Total cost breakdown by model
 - Per-problem termination reasons for failure analysis
 
+### Analyzing Multi-Run Results
+
+For statistical rigor, run benchmarks multiple times and aggregate results:
+
+```bash
+# Aggregate results from multiple runs
+python scripts/analyze_results.py --results-dir results
+
+# Outputs: results/summary.json, results/comparison.csv
+```
+
+### Visualizing Results
+
+Generate a comprehensive 4-panel comparison dashboard:
+
+```bash
+# Generate dashboard from comparison data
+python scripts/visualize_results.py
+
+# Custom paths
+python scripts/visualize_results.py --input results/comparison.csv --output results/dashboard.png
+
+# Generate both PNG and PDF (vector graphics)
+python scripts/visualize_results.py --format both
+```
+
+The dashboard includes:
+- **Pass Rate Panel**: Horizontal bars with 95% CI error bars
+- **Cost Efficiency Panel**: Scatter plot with Pareto frontier
+- **Self-Healing Impact Panel**: Stacked bars showing zero-shot + lift
+- **Cost Analysis Panel**: Total cost with iteration annotations
+
+![Comparison Dashboard](results/comparison_dashboard.png)
+
 ## 📊 Research Applications
 
 This framework is designed for research in:
@@ -413,6 +470,12 @@ Core dependencies:
 - `e2b-code-interpreter>=1.0.0` - Sandbox code execution
 - `python-dotenv>=1.0.0` - Environment variable management
 
+Visualization dependencies:
+- `matplotlib>=3.9.0` - Plotting library
+- `seaborn>=0.13.0` - Statistical visualization
+- `pandas>=2.2.0` - Data manipulation
+- `numpy>=2.2.0` - Numerical computing
+
 See `requirements.txt` for complete list.
 
 ## 🎓 Learning Resources
@@ -447,6 +510,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [x] Critic feedback safeguards (truncation and stuck state detection)
 - [x] Cost tracking and termination reason analytics
+- [x] Multi-run statistical analysis with 95% CI
+- [x] Visualization dashboard for benchmark comparisons
 - [ ] Adaptive termination policies based on problem difficulty
 - [ ] Code similarity detection (beyond identical feedback)
 - [ ] Add more specialized nodes (optimizer, security checker, tester)
@@ -454,7 +519,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [ ] Add memory/learning capabilities across sessions
 - [ ] Integrate with local code editors via LSP
 - [ ] Build web interface for easier experimentation
-- [ ] Automated benchmark comparison across different configurations
 - [ ] Support for multi-file projects
 
 ## 📧 Contact
