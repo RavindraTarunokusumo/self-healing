@@ -15,10 +15,8 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -66,15 +64,6 @@ def load_comparison_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def load_summary_stats(json_path: str) -> dict:
-    """Load detailed summary statistics from JSON file (optional)."""
-    if not os.path.exists(json_path):
-        return {}
-
-    with open(json_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-
 def get_color(config: str) -> str:
     """Get color for a configuration."""
     return MODEL_COLORS.get(config, '#6B7280')  # Default gray
@@ -98,12 +87,12 @@ def plot_pass_rate_panel(ax: plt.Axes, data: pd.DataFrame):
     xerr_high = sorted_data['pass_rate_ci_high'] - sorted_data['pass_rate_mean']
 
     # Create horizontal bars
-    bars = ax.barh(y_pos, sorted_data['pass_rate_mean'], color=colors,
-                   xerr=[xerr_low, xerr_high], capsize=4,
-                   error_kw={'elinewidth': 1.5, 'capthick': 1.5, 'color': '#374151'})
+    ax.barh(y_pos, sorted_data['pass_rate_mean'], color=colors,
+            xerr=[xerr_low, xerr_high], capsize=4,
+            error_kw={'elinewidth': 1.5, 'capthick': 1.5, 'color': '#374151'})
 
     # Add value annotations
-    for i, (idx, row) in enumerate(sorted_data.iterrows()):
+    for i, (_, row) in enumerate(sorted_data.iterrows()):
         ax.annotate(f"{row['pass_rate_mean']:.1f}%",
                    xy=(row['pass_rate_mean'] + 0.5, i),
                    va='center', ha='left', fontsize=9, fontweight='bold')
@@ -155,11 +144,11 @@ def plot_cost_efficiency_panel(ax: plt.Axes, data: pd.DataFrame):
     colors = [get_color(c) for c in data['config']]
 
     # Scatter plot
-    scatter = ax.scatter(data['pass_rate_mean'], data['cost_per_pass_mean'] * 1000,  # Convert to milli-dollars
-                        s=size_scale, c=colors, alpha=0.8, edgecolors='white', linewidths=2)
+    ax.scatter(data['pass_rate_mean'], data['cost_per_pass_mean'] * 1000,  # Convert to milli-dollars
+               s=size_scale, c=colors, alpha=0.8, edgecolors='white', linewidths=2)
 
     # Add labels near each point
-    for idx, row in data.iterrows():
+    for _, row in data.iterrows():
         # Offset based on position to avoid overlap
         x_offset = 0.3 if row['pass_rate_mean'] < 95 else -0.3
         ha = 'left' if x_offset > 0 else 'right'
@@ -213,18 +202,18 @@ def plot_self_healing_impact_panel(ax: plt.Axes, data: pd.DataFrame):
 
     # Base bars (zero-shot)
     light_colors = [get_light_color(c) for c in sorted_data['config']]
-    base_bars = ax.bar(x_pos, sorted_data['zero_shot_mean'], bar_width,
-                       color=light_colors, label='Zero-Shot Rate', edgecolor='white', linewidth=0.5)
+    ax.bar(x_pos, sorted_data['zero_shot_mean'], bar_width,
+           color=light_colors, label='Zero-Shot Rate', edgecolor='white', linewidth=0.5)
 
     # Lift bars (stacked on top)
     dark_colors = [get_color(c) for c in sorted_data['config']]
-    lift_bars = ax.bar(x_pos, sorted_data['self_heal_lift_mean'], bar_width,
-                       bottom=sorted_data['zero_shot_mean'], color=dark_colors,
-                       label='Self-Heal Lift', edgecolor='white', linewidth=0.5,
-                       hatch='///', alpha=0.9)
+    ax.bar(x_pos, sorted_data['self_heal_lift_mean'], bar_width,
+           bottom=sorted_data['zero_shot_mean'], color=dark_colors,
+           label='Self-Heal Lift', edgecolor='white', linewidth=0.5,
+           hatch='///', alpha=0.9)
 
     # Add lift annotations on the lift bars
-    for i, (idx, row) in enumerate(sorted_data.iterrows()):
+    for i, (_, row) in enumerate(sorted_data.iterrows()):
         lift_y = row['zero_shot_mean'] + row['self_heal_lift_mean'] / 2
         ax.annotate(f"+{row['self_heal_lift_mean']:.1f}%",
                    xy=(i, lift_y), ha='center', va='center',
@@ -266,11 +255,11 @@ def plot_cost_breakdown_panel(ax: plt.Axes, data: pd.DataFrame):
 
     colors = [get_color(c) for c in sorted_data['config']]
 
-    bars = ax.bar(x_pos, sorted_data['total_cost_mean'], bar_width, color=colors,
-                  edgecolor='white', linewidth=0.5)
+    ax.bar(x_pos, sorted_data['total_cost_mean'], bar_width, color=colors,
+           edgecolor='white', linewidth=0.5)
 
     # Add iteration annotations on each bar
-    for i, (idx, row) in enumerate(sorted_data.iterrows()):
+    for i, (_, row) in enumerate(sorted_data.iterrows()):
         # Cost annotation at top
         ax.annotate(f"${row['total_cost_mean']:.3f}",
                    xy=(i, row['total_cost_mean'] + 0.01), ha='center', va='bottom',
@@ -299,7 +288,7 @@ def plot_cost_breakdown_panel(ax: plt.Axes, data: pd.DataFrame):
     ax.spines['right'].set_visible(False)
 
 
-def create_dashboard(data: pd.DataFrame, summary_stats: dict = None) -> plt.Figure:
+def create_dashboard(data: pd.DataFrame) -> plt.Figure:
     """Create the 4-panel dashboard visualization."""
     # Set up the figure with 2x2 grid
     fig, axes = plt.subplots(2, 2, figsize=(16, 12), dpi=100)
@@ -379,8 +368,6 @@ def main():
     )
     parser.add_argument('--input', '-i', default='results/comparison.csv',
                        help='Path to comparison CSV file (default: results/comparison.csv)')
-    parser.add_argument('--summary', '-s', default='results/summary.json',
-                       help='Path to summary JSON file (optional, default: results/summary.json)')
     parser.add_argument('--output', '-o', default='results/comparison_dashboard.png',
                        help='Output file path (default: results/comparison_dashboard.png)')
     parser.add_argument('--format', '-f', choices=['png', 'pdf', 'both'], default='png',
@@ -394,14 +381,9 @@ def main():
         data = load_comparison_data(args.input)
         print(f"Loaded {len(data)} configurations")
 
-        # Load optional summary stats
-        summary_stats = load_summary_stats(args.summary)
-        if summary_stats:
-            print(f"Loaded summary statistics with {len(summary_stats)} entries")
-
         # Create dashboard
         print("Creating 4-panel dashboard...")
-        fig = create_dashboard(data, summary_stats)
+        fig = create_dashboard(data)
 
         # Save output
         save_dashboard(fig, args.output, args.format)
