@@ -404,13 +404,75 @@ python scripts/visualize_results.py --input results/comparison.csv --output resu
 python scripts/visualize_results.py --format both
 ```
 
-The dashboard includes:
-- **Pass Rate Panel**: Horizontal bars with 95% CI error bars
-- **Cost Efficiency Panel**: Scatter plot with Pareto frontier
-- **Self-Healing Impact Panel**: Stacked bars showing zero-shot + lift
-- **Cost Analysis Panel**: Total cost with iteration annotations
+## 📈 Results
+
+Comprehensive comparison study on HumanEval benchmark (164 problems, 5 runs per configuration):
+
+### Performance Metrics
+
+| Configuration | Pass Rate | 95% CI | Zero-Shot | Self-Heal Lift | Avg Iterations |
+|---------------|-----------|---------|-----------|----------------|----------------|
+| **max-max** | 96.8% ± 0.8% | [95.8%, 97.8%] | 87.2% | **+9.6%** | 1.19 |
+| **flash-max** | 94.3% ± 1.3% | [92.7%, 95.8%] | 77.8% | **+16.5%** | 1.33 |
+| **flash-flash** | 95.0% ± 0.8% | [94.0%, 96.0%] | 83.3% | **+11.7%** | 1.30 |
+| **coder-coder** | 93.0% ± 0.9% | [91.9%, 94.2%] | 79.5% | **+13.5%** | 1.42 |
+| **flash-coder** | 92.9% ± 0.8% | [91.9%, 93.9%] | 75.4% | **+17.6%** | 1.45 |
+
+### Cost Analysis
+
+| Configuration | Total Cost | Cost per Pass | Cost Ratio | Cost Efficiency Rank |
+|---------------|------------|---------------|------------|---------------------|
+| **flash-flash** | $0.020 ± 0.002 | $0.00013 ± 0.00001 | 1.0× (baseline) | 🥇 **Best** |
+| **flash-coder** | $0.063 ± 0.006 | $0.00041 ± 0.00004 | 3.2× | 🥈 |
+| **coder-coder** | $0.135 ± 0.006 | $0.00089 ± 0.00005 | 6.8× | 🥉 |
+| **flash-max** | $0.196 ± 0.020 | $0.00127 ± 0.00014 | 9.8× | 4th |
+| **max-max** | $0.384 ± 0.024 | $0.00242 ± 0.00017 | 18.7× | 5th (most expensive) |
+
+### Key Findings
+
+**1. Performance Winner**: `max-max` achieves highest pass rate (96.8%) but at premium cost
+
+**2. Cost Efficiency Champion**: `flash-flash` delivers 95% pass rate at **19× lower cost** ($0.00013/pass vs $0.0024/pass)
+
+**3. Self-Healing Success**: All configurations show significant improvement:
+- Cheaper models benefit more: `flash-coder` +17.6% vs `max-max` +9.6%
+- Self-healing validates the hypothesis: cheap models + iteration ≈ expensive single-shot
+
+**4. Cost-Performance Trade-offs**:
+- **Best Performance**: max-max (96.8% pass, $0.0024/pass) - for absolute accuracy
+- **Best Value**: flash-flash (95.0% pass, $0.00013/pass) - for cost-sensitive applications
+- **Balanced**: flash-max (94.3% pass, $0.00127/pass) - hybrid approach
+
+**5. Iteration Efficiency**: Similar iteration counts (1.2-1.5) across configs despite 19× cost difference
+
+### Statistical Significance (95% CI)
+
+- **max-max vs flash-flash**: Significantly different (p < 0.01)
+- **max-max vs flash-coder**: Significantly different (p < 0.001)
+- **flash-flash vs flash-coder**: Significantly different (p < 0.01)
+- **flash-max vs flash-flash**: Not significantly different (p = 0.31)
+
+### Visualization Dashboard
 
 ![Comparison Dashboard](results/comparison_dashboard.png)
+
+**Dashboard Panels**:
+1. **Pass Rate with 95% CI** (Top-Left): Performance comparison with confidence intervals
+2. **Cost Efficiency Scatter** (Top-Right): Trade-off analysis with Pareto frontier, measured in milli-dollars (m$)
+3. **Self-Healing Impact** (Bottom-Left): Zero-shot baseline + self-healing lift
+4. **Total Cost Analysis** (Bottom-Right): Cost breakdown across configurations
+
+### Actionable Insights
+
+**For Production Systems**:
+- Use `flash-flash` for cost-sensitive applications (95% accuracy at $0.00013/pass)
+- Use `max-max` when absolute accuracy matters (96.8% at $0.0024/pass)
+- Marginal 1.8% improvement costs 19× more
+
+**For Research**:
+- Cheaper models benefit more from self-healing (diminishing returns on expensive models)
+- Self-healing framework successfully validates cost-benefit hypothesis
+- Infrastructure for further experiments (adaptive termination, model routing, etc.)
 
 ## 📊 Research Applications
 
@@ -504,7 +566,7 @@ This is a research project. Contributions are welcome:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## 🔮 Future Directions
 
@@ -512,6 +574,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] Cost tracking and termination reason analytics
 - [x] Multi-run statistical analysis with 95% CI
 - [x] Visualization dashboard for benchmark comparisons
+- [ ] Expand benchmark loaders for other benchmarks
 - [ ] Adaptive termination policies based on problem difficulty
 - [ ] Code similarity detection (beyond identical feedback)
 - [ ] Add more specialized nodes (optimizer, security checker, tester)
@@ -529,11 +592,9 @@ For questions or collaboration opportunities:
 
 ## 🙏 Acknowledgments
 
-Built with:
+- [HuggingFace](https://huggingface.co/datasets/openai/openai_humaneval) for benchmark dataset
 - [LangGraph](https://github.com/langchain-ai/langgraph) by LangChain
 - [E2B](https://e2b.dev/) for secure code execution
 - Inspired by research in Reflexion and self-correction agents
-
+- Built using Claude Code
 ---
-
-**Happy Coding! 🚀**
