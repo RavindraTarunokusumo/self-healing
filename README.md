@@ -573,6 +573,7 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 - [x] Visualization dashboard for benchmark comparisons
 - [ ] Expand benchmark loaders for other benchmarks
 - [ ] Adaptive termination policies based on problem difficulty
+- [ ] Prompt caching and batch processing implementation
 - [ ] Code similarity detection (beyond identical feedback)
 - [ ] Add more specialized nodes (optimizer, security checker, tester)
 - [ ] Implement multi-language support (JavaScript, Go, etc.)
