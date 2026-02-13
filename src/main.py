@@ -396,7 +396,14 @@ def run_benchmark(agent: SelfHealingAgent, args) -> list:
             "termination_reason": result.get("termination_reason", ""),
             "iterations": result["iteration"],
             "token_usage": token_usage,
-            "cost": cost_info
+            "cost": cost_info,
+            "evaluation": {
+                "quality_score": result.get("quality_score", 0.0),
+                "score_history": result.get("quality_score_history", []),
+                "failed_criteria": result.get("failed_criteria", []),
+                "schema_valid": result.get("termination_reason") != "schema_error",
+                "critic_retries": result.get("critic_retries", 0)
+            }
         })
         logger.info(f"Problem {problem.task_id} result appended")
 
@@ -470,6 +477,43 @@ def calculate_benchmark_summary(problems_results: list) -> dict:
     total_cost = total_coder_cost + total_critic_cost
     cost_per_pass = total_cost / passed if passed > 0 else 0.0
 
+    # Aggregate evaluation telemetry
+    schema_valid_count = 0
+    total_critic_retries = 0
+    quality_scores = []
+    all_score_deltas = []
+    for r in problems_results:
+        evaluation = r.get("evaluation", {})
+        if evaluation:
+            if evaluation.get("schema_valid", False):
+                schema_valid_count += 1
+            total_critic_retries += evaluation.get("critic_retries", 0)
+
+            score = evaluation.get("quality_score", None)
+            if isinstance(score, (int, float)):
+                quality_scores.append(float(score))
+
+            history = evaluation.get("score_history", [])
+            if isinstance(history, list) and len(history) > 1:
+                for i in range(len(history) - 1):
+                    prev = history[i]
+                    curr = history[i + 1]
+                    if isinstance(prev, (int, float)) and isinstance(curr, (int, float)):
+                        all_score_deltas.append(float(curr) - float(prev))
+
+    schema_invalid_count = total - schema_valid_count
+    avg_critic_retries = total_critic_retries / total if total > 0 else 0.0
+    avg_quality_score = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
+    avg_score_delta = sum(all_score_deltas) / len(all_score_deltas) if all_score_deltas else 0.0
+    schema_error_rate = (
+        termination_counts.get("schema_error", 0) / total * 100
+        if total > 0 else 0.0
+    )
+    no_improvement_rate = (
+        termination_counts.get("no_improvement", 0) / total * 100
+        if total > 0 else 0.0
+    )
+
     return {
         "problems": {
             "total": total,
@@ -506,6 +550,15 @@ def calculate_benchmark_summary(problems_results: list) -> dict:
             "critic_cost": total_critic_cost,
             "total_cost": total_cost,
             "cost_per_pass": cost_per_pass
+        },
+        "evaluation": {
+            "schema_valid_count": schema_valid_count,
+            "schema_invalid_count": schema_invalid_count,
+            "schema_error_rate": schema_error_rate,
+            "no_improvement_rate": no_improvement_rate,
+            "avg_critic_retries_per_problem": avg_critic_retries,
+            "avg_quality_score": avg_quality_score,
+            "avg_score_delta": avg_score_delta
         }
     }
 

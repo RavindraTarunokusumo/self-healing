@@ -832,6 +832,23 @@ class SelfHealingAgent:
                 ]
 
         # Determine if code is complete (no errors and APPROVED by critic)
+        previous_score = state.get("quality_score_history", [])[-1] if state.get("quality_score_history") else None
+        score_delta = (
+            structured_feedback["quality_score"] - previous_score
+            if previous_score is not None
+            else None
+        )
+        self.logger.info(
+            f"{Fore.MAGENTA}Critic structured result: "
+            f"status={structured_feedback['status']}, "
+            f"score={structured_feedback['quality_score']:.3f}, "
+            f"failed_criteria={len(structured_feedback['failed_criteria'])}, "
+            f"retries={critic_retries}{Style.RESET_ALL}"
+        )
+        if score_delta is not None:
+            self.logger.info(f"{Fore.MAGENTA}Score delta vs previous iteration: {score_delta:+.3f}{Style.RESET_ALL}")
+
+        # Determine if code is complete (no errors and APPROVED by critic)
         is_complete = (
             not state["execution_error"] and
             structured_feedback["status"] == "APPROVED" and
@@ -847,6 +864,8 @@ class SelfHealingAgent:
         # Write critic feedback to output file
         serialized_feedback = json.dumps(structured_feedback, indent=2, sort_keys=True)
         self._write_critic_feedback(serialized_feedback)
+        if score_delta is not None:
+            self._write_to_output(f"SCORE DELTA: {score_delta:+.3f}\n\n")
 
         # Update feedback history if stuck detection enabled
         updated_history = state.get("feedback_history", [])
