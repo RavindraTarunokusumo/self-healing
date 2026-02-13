@@ -110,6 +110,24 @@ def main():
         default=1,
         help="Retries for critic schema validation failures (default: 1)"
     )
+    parser.add_argument(
+        "--approval-threshold",
+        type=float,
+        default=0.9,
+        help="Minimum critic quality score required for approval (default: 0.9)"
+    )
+    parser.add_argument(
+        "--no-improvement-patience",
+        type=int,
+        default=2,
+        help="Iterations without meaningful score gain before stopping (default: 2)"
+    )
+    parser.add_argument(
+        "--min-score-delta",
+        type=float,
+        default=0.02,
+        help="Minimum quality score improvement considered meaningful (default: 0.02)"
+    )
 
     # Benchmark arguments
     parser.add_argument(
@@ -187,7 +205,10 @@ def main():
             stuck_detection_threshold=args.stuck_threshold,
             early_termination_on_stuck=args.early_termination_on_stuck,
             early_termination_on_truncation=args.early_termination_on_truncation,
-            max_critic_schema_retries=args.max_critic_schema_retries
+            max_critic_schema_retries=args.max_critic_schema_retries,
+            approval_score_threshold=args.approval_threshold,
+            no_improvement_patience=args.no_improvement_patience,
+            min_score_delta=args.min_score_delta
         )
         logger.info("SelfHealingAgent initialized successfully")
     except Exception as e:

@@ -122,7 +122,10 @@ class SelfHealingAgent:
         stuck_detection_threshold: int = 2,
         early_termination_on_stuck: bool = False,
         early_termination_on_truncation: bool = False,
-        max_critic_schema_retries: int = 1
+        max_critic_schema_retries: int = 1,
+        approval_score_threshold: float = 0.90,
+        no_improvement_patience: int = 2,
+        min_score_delta: float = 0.02
     ):
         """
         Initialize the Self-Healing Agent.
@@ -146,6 +149,9 @@ class SelfHealingAgent:
         self.early_termination_on_stuck = early_termination_on_stuck
         self.early_termination_on_truncation = early_termination_on_truncation
         self.max_critic_schema_retries = max_critic_schema_retries
+        self.approval_score_threshold = approval_score_threshold
+        self.no_improvement_patience = no_improvement_patience
+        self.min_score_delta = min_score_delta
 
         # Initialize token usage tracking
         self._reset_token_usage()
@@ -393,6 +399,25 @@ class SelfHealingAgent:
             return True
 
         return False
+
+    def _detect_no_improvement(self, state: AgentState) -> bool:
+        """
+        Detect convergence failure when quality score is not improving.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            True if score failed to improve for configured patience window
+        """
+        history = state.get("quality_score_history", [])
+        window = self.no_improvement_patience + 1
+        if self.no_improvement_patience <= 0 or len(history) < window:
+            return False
+
+        recent = history[-window:]
+        deltas = [recent[i + 1] - recent[i] for i in range(len(recent) - 1)]
+        return all(delta < self.min_score_delta for delta in deltas)
 
     def _is_infrastructure_error(self, error_message: str) -> bool:
         """
@@ -809,7 +834,9 @@ class SelfHealingAgent:
         # Determine if code is complete (no errors and APPROVED by critic)
         is_complete = (
             not state["execution_error"] and
-            structured_feedback["status"] == "APPROVED"
+            structured_feedback["status"] == "APPROVED" and
+            structured_feedback["quality_score"] >= self.approval_score_threshold and
+            not structured_feedback["failed_criteria"]
         )
 
         if is_complete:
@@ -877,7 +904,14 @@ class SelfHealingAgent:
         if state.get("termination_reason") == "schema_error":
             return "end"
 
-        # Check 4: Stuck state detection
+        # Check 4: Score stagnation detection
+        if self._detect_no_improvement(state):
+            self.logger.warning(
+                f"\n{Fore.YELLOW}Warning: No quality-score improvement for {self.no_improvement_patience} iteration(s){Style.RESET_ALL}"
+            )
+            return "end"
+
+        # Check 5: Stuck state detection
         if self._detect_stuck_state(state):
             self.logger.warning(
                 f"\n{Fore.YELLOW}Warning: Stuck state detected - "
@@ -891,12 +925,12 @@ class SelfHealingAgent:
             else:
                 self.logger.info(f"{Fore.YELLOW}→ Continuing despite stuck state (early_termination_on_stuck=False){Style.RESET_ALL}")
 
-        # Check 5: Max iterations
+        # Check 6: Max iterations
         if state["iteration"] >= state["max_iterations"]:
             self.logger.info(f"\n{Fore.RED}✗ Max iterations reached. Workflow ending.{Style.RESET_ALL}")
             return "end"
 
-        # Check 6: Continue
+        # Check 7: Continue
         self.logger.info(f"\n{Fore.YELLOW}→ Continuing to next iteration...{Style.RESET_ALL}")
         return "continue"
     
@@ -965,6 +999,8 @@ class SelfHealingAgent:
         if not final_state.get("termination_reason"):
             if final_state["is_complete"]:
                 final_state["termination_reason"] = "approved"
+            elif self._detect_no_improvement(final_state):
+                final_state["termination_reason"] = "no_improvement"
             elif self._detect_stuck_state(final_state):
                 final_state["termination_reason"] = "stuck"
             else:
