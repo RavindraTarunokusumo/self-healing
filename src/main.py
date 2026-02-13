@@ -104,6 +104,12 @@ def main():
         action="store_true",
         help="Terminate immediately when critic response is truncated (default: continue)"
     )
+    parser.add_argument(
+        "--max-critic-schema-retries",
+        type=int,
+        default=1,
+        help="Retries for critic schema validation failures (default: 1)"
+    )
 
     # Benchmark arguments
     parser.add_argument(
@@ -180,7 +186,8 @@ def main():
             enable_stuck_detection=args.enable_stuck_detection,
             stuck_detection_threshold=args.stuck_threshold,
             early_termination_on_stuck=args.early_termination_on_stuck,
-            early_termination_on_truncation=args.early_termination_on_truncation
+            early_termination_on_truncation=args.early_termination_on_truncation,
+            max_critic_schema_retries=args.max_critic_schema_retries
         )
         logger.info("SelfHealingAgent initialized successfully")
     except Exception as e:

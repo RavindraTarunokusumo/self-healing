@@ -13,6 +13,7 @@ Architecture:
 
 import os
 import logging
+import json
 from datetime import datetime
 from typing import Literal, TypedDict
 import typing
@@ -50,15 +51,27 @@ ERR: {execution_error}
 CRITIC: {critic_feedback}
 Output fixed code only."""
 
-CRITIC_SYSTEM_PROMPT = """Review code against spec. Output ONLY in this format:
+CRITIC_SYSTEM_PROMPT = """Review code against spec and output ONLY valid JSON.
 
-If correct: APPROVED
+Required schema:
+{
+  "status": "APPROVED" | "FAIL",
+  "quality_score": 0.0-1.0,
+  "failed_criteria": ["criterion_name", "..."],
+  "issues": [
+    {
+      "type": "syntax" | "runtime" | "logic" | "output" | "edge_case",
+      "loc": "line_number_or_N/A",
+      "fix": "one sentence fix instruction",
+      "severity": "low" | "medium" | "high"
+    }
+  ]
+}
 
-If issues exist:
-STATUS: FAIL
-TYPE: <syntax|runtime|logic|output|edge_case>
-LOC: <line_number or "N/A">
-FIX: <one sentence fix instruction>"""
+Rules:
+- Output JSON only (no markdown, no prose).
+- If status is APPROVED, set failed_criteria to [] and issues to [].
+- If status is FAIL, include at least one failed_criteria item and one issue."""
 
 CRITIC_USER_TEMPLATE = """SPEC: {specification}
 CODE:
@@ -77,11 +90,16 @@ class AgentState(TypedDict):
     execution_error: str  # Error messages if any
     is_infrastructure_error: bool  # True if error is infrastructure (E2B, network) vs code error
     critic_feedback: str  # Feedback from the critic
+    critic_structured: dict  # Parsed critic JSON
+    quality_score: float  # Current critic quality score
+    quality_score_history: list[float]  # Critic score per iteration
+    failed_criteria: list[str]  # Failed rubric criteria from critic
+    critic_retries: int  # Number of schema retries used in current iteration
     feedback_history: list  # Track all critic feedback for stuck detection
     iteration: int  # Current iteration count
     max_iterations: int  # Maximum allowed iterations
     is_complete: bool  # Whether the code is correct and complete
-    termination_reason: str  # Why workflow ended: approved, max_iterations, stuck, truncated, infrastructure_error
+    termination_reason: str  # Why workflow ended: approved, max_iterations, stuck, truncated, infrastructure_error, schema_error, no_improvement
 
 
 class SelfHealingAgent:
@@ -103,7 +121,8 @@ class SelfHealingAgent:
         enable_stuck_detection: bool = False,
         stuck_detection_threshold: int = 2,
         early_termination_on_stuck: bool = False,
-        early_termination_on_truncation: bool = False
+        early_termination_on_truncation: bool = False,
+        max_critic_schema_retries: int = 1
     ):
         """
         Initialize the Self-Healing Agent.
@@ -126,6 +145,7 @@ class SelfHealingAgent:
         self.stuck_detection_threshold = stuck_detection_threshold
         self.early_termination_on_stuck = early_termination_on_stuck
         self.early_termination_on_truncation = early_termination_on_truncation
+        self.max_critic_schema_retries = max_critic_schema_retries
 
         # Initialize token usage tracking
         self._reset_token_usage()
@@ -254,6 +274,94 @@ class SelfHealingAgent:
             pass  # Silently handle errors
 
         return False
+
+    def _parse_critic_feedback_json(self, raw_feedback: str) -> dict:
+        """
+        Parse and validate strict JSON critic output.
+
+        Args:
+            raw_feedback: Raw critic response text
+
+        Returns:
+            Validated and normalized critic payload
+
+        Raises:
+            ValueError: If payload is not valid JSON or fails schema validation
+        """
+        text = (raw_feedback or "").strip()
+        if not text:
+            raise ValueError("Empty critic response")
+
+        if text.startswith("```"):
+            parts = text.split("```")
+            if len(parts) < 2:
+                raise ValueError("Malformed markdown fence in critic response")
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise ValueError("Critic response is not valid JSON")
+            payload = json.loads(text[start:end + 1])
+
+        if not isinstance(payload, dict):
+            raise ValueError("Critic payload must be a JSON object")
+
+        required_fields = {"status", "quality_score", "failed_criteria", "issues"}
+        missing = required_fields.difference(payload.keys())
+        if missing:
+            raise ValueError(f"Critic payload missing fields: {sorted(missing)}")
+
+        status = str(payload["status"]).upper()
+        if status not in {"APPROVED", "FAIL"}:
+            raise ValueError("status must be APPROVED or FAIL")
+
+        quality_score = payload["quality_score"]
+        if not isinstance(quality_score, (int, float)):
+            raise ValueError("quality_score must be numeric")
+        quality_score = float(quality_score)
+        if quality_score < 0.0 or quality_score > 1.0:
+            raise ValueError("quality_score must be between 0.0 and 1.0")
+
+        failed_criteria = payload["failed_criteria"]
+        if not isinstance(failed_criteria, list) or not all(isinstance(x, str) for x in failed_criteria):
+            raise ValueError("failed_criteria must be a list of strings")
+
+        issues = payload["issues"]
+        if not isinstance(issues, list):
+            raise ValueError("issues must be a list")
+        for idx, issue in enumerate(issues):
+            if not isinstance(issue, dict):
+                raise ValueError(f"issues[{idx}] must be an object")
+            for key in ("type", "loc", "fix", "severity"):
+                if key not in issue:
+                    raise ValueError(f"issues[{idx}] missing '{key}'")
+                if not isinstance(issue[key], str):
+                    raise ValueError(f"issues[{idx}].{key} must be a string")
+            if issue["type"] not in {"syntax", "runtime", "logic", "output", "edge_case"}:
+                raise ValueError(f"issues[{idx}].type is invalid")
+            if issue["severity"] not in {"low", "medium", "high"}:
+                raise ValueError(f"issues[{idx}].severity is invalid")
+
+        if status == "APPROVED":
+            if failed_criteria or issues:
+                raise ValueError("APPROVED status requires empty failed_criteria and issues")
+        else:
+            if not failed_criteria or not issues:
+                raise ValueError("FAIL status requires non-empty failed_criteria and issues")
+
+        return {
+            "status": status,
+            "quality_score": quality_score,
+            "failed_criteria": failed_criteria,
+            "issues": issues,
+        }
 
     def _detect_stuck_state(self, state: AgentState) -> bool:
         """
@@ -604,6 +712,10 @@ class SelfHealingAgent:
             return {
                 **state,
                 "critic_feedback": feedback,
+                "critic_structured": {},
+                "quality_score": 0.0,
+                "failed_criteria": [],
+                "critic_retries": 0,
                 "feedback_history": state.get("feedback_history", []),
                 "iteration": state["iteration"] + 1,
                 "is_complete": False,
@@ -623,41 +735,81 @@ class SelfHealingAgent:
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)
         ]
-        
-        response = self.critic_llm.invoke(messages)
-        feedback = response.content
 
-        # Track token usage
-        input_tokens, output_tokens = self._extract_token_usage(response)
-        self.critic_input_tokens += input_tokens
-        self.critic_output_tokens += output_tokens
-        self.critic_calls += 1
+        critic_retries = 0
+        structured_feedback = None
+        feedback = ""
+        while critic_retries <= self.max_critic_schema_retries:
+            response = self.critic_llm.invoke(messages)
+            feedback = response.content
 
-        # Detect truncation/malformed response
-        is_truncated = self._is_response_truncated(response)
-        if is_truncated:
-            self.logger.warning(f"{Fore.RED}Warning: Critic response was truncated due to token limit{Style.RESET_ALL}")
-            feedback = feedback + "\n[TRUNCATED]"
-            if self.early_termination_on_truncation:
-                self.logger.error(f"{Fore.RED}Terminating due to truncated critic response{Style.RESET_ALL}")
-                self._write_critic_feedback(feedback)
-                # Update feedback history if enabled
-                updated_history = state.get("feedback_history", [])
-                if self.enable_stuck_detection:
-                    updated_history = updated_history + [feedback]
-                return {
-                    **state,
-                    "critic_feedback": feedback,
-                    "feedback_history": updated_history,
-                    "iteration": state["iteration"] + 1,
-                    "is_complete": False,
-                    "termination_reason": "truncated"
-                }
+            # Track token usage
+            input_tokens, output_tokens = self._extract_token_usage(response)
+            self.critic_input_tokens += input_tokens
+            self.critic_output_tokens += output_tokens
+            self.critic_calls += 1
+
+            is_truncated = self._is_response_truncated(response)
+            if is_truncated:
+                self.logger.warning(f"{Fore.RED}Warning: Critic response was truncated due to token limit{Style.RESET_ALL}")
+                feedback = feedback + "\n[TRUNCATED]"
+                if self.early_termination_on_truncation:
+                    self.logger.error(f"{Fore.RED}Terminating due to truncated critic response{Style.RESET_ALL}")
+                    self._write_critic_feedback(feedback)
+                    updated_history = state.get("feedback_history", [])
+                    if self.enable_stuck_detection:
+                        updated_history = updated_history + [feedback]
+                    return {
+                        **state,
+                        "critic_feedback": feedback,
+                        "critic_structured": {},
+                        "quality_score": 0.0,
+                        "failed_criteria": [],
+                        "critic_retries": critic_retries,
+                        "feedback_history": updated_history,
+                        "iteration": state["iteration"] + 1,
+                        "is_complete": False,
+                        "termination_reason": "truncated"
+                    }
+
+            try:
+                structured_feedback = self._parse_critic_feedback_json(feedback)
+                break
+            except ValueError as e:
+                if critic_retries >= self.max_critic_schema_retries:
+                    error_feedback = f"{feedback}\n[SCHEMA_ERROR] {e}"
+                    self.logger.error(f"{Fore.RED}Critic JSON schema validation failed: {e}{Style.RESET_ALL}")
+                    self._write_critic_feedback(error_feedback)
+                    updated_history = state.get("feedback_history", [])
+                    if self.enable_stuck_detection:
+                        updated_history = updated_history + [error_feedback]
+                    return {
+                        **state,
+                        "critic_feedback": error_feedback,
+                        "critic_structured": {},
+                        "quality_score": 0.0,
+                        "failed_criteria": [],
+                        "critic_retries": critic_retries,
+                        "feedback_history": updated_history,
+                        "iteration": state["iteration"] + 1,
+                        "is_complete": False,
+                        "termination_reason": "schema_error"
+                    }
+
+                critic_retries += 1
+                self.logger.warning(
+                    f"{Fore.YELLOW}Critic JSON validation failed (attempt {critic_retries}/{self.max_critic_schema_retries}): {e}{Style.RESET_ALL}"
+                )
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt),
+                    HumanMessage(content=f"Your previous output was invalid JSON for this schema: {e}. Return ONLY valid JSON.")
+                ]
 
         # Determine if code is complete (no errors and APPROVED by critic)
         is_complete = (
             not state["execution_error"] and
-            "APPROVED" in feedback.upper()
+            structured_feedback["status"] == "APPROVED"
         )
 
         if is_complete:
@@ -666,16 +818,24 @@ class SelfHealingAgent:
             self.logger.info(f"{Fore.MAGENTA}Critic: Requesting fixes{Style.RESET_ALL}")
 
         # Write critic feedback to output file
-        self._write_critic_feedback(feedback)
+        serialized_feedback = json.dumps(structured_feedback, indent=2, sort_keys=True)
+        self._write_critic_feedback(serialized_feedback)
 
         # Update feedback history if stuck detection enabled
         updated_history = state.get("feedback_history", [])
         if self.enable_stuck_detection:
-            updated_history = updated_history + [feedback]
+            updated_history = updated_history + [serialized_feedback]
+
+        updated_score_history = state.get("quality_score_history", []) + [structured_feedback["quality_score"]]
 
         return {
             **state,
-            "critic_feedback": feedback,
+            "critic_feedback": serialized_feedback,
+            "critic_structured": structured_feedback,
+            "quality_score": structured_feedback["quality_score"],
+            "quality_score_history": updated_score_history,
+            "failed_criteria": structured_feedback["failed_criteria"],
+            "critic_retries": critic_retries,
             "feedback_history": updated_history,
             "iteration": state["iteration"] + 1,
             "is_complete": is_complete,
@@ -712,6 +872,9 @@ class SelfHealingAgent:
 
         # Check 3: Early termination on truncation (termination_reason already set in _critic_node)
         if state.get("termination_reason") == "truncated":
+            return "end"
+
+        if state.get("termination_reason") == "schema_error":
             return "end"
 
         # Check 4: Stuck state detection
@@ -784,6 +947,11 @@ class SelfHealingAgent:
             "execution_error": "",
             "is_infrastructure_error": False,
             "critic_feedback": "",
+            "critic_structured": {},
+            "quality_score": 0.0,
+            "quality_score_history": [],
+            "failed_criteria": [],
+            "critic_retries": 0,
             "feedback_history": [],
             "iteration": 0,
             "max_iterations": self.max_iterations,
